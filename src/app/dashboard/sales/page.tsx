@@ -25,6 +25,22 @@ function barcodesMatch(a: string, b: string): boolean {
   return xNoZero !== "" && xNoZero === yNoZero;
 }
 
+function cleanScan(v: string): string {
+  const q = v.trim();
+  if (/^\d+$/.test(q) && q.length > 13) return q.slice(-13);
+  // ✅ Custom: TAH-6889-GHJTAH-6889-GHJ -> TAH-6889-GHJ
+  if (q.length > 6 && q.length % 2 === 0) {
+    const half = q.slice(0, q.length / 2);
+    if (q === half + half) return half;
+  }
+  if (q.length > 13) {
+    const first = q.slice(0, 13);
+    if (q.startsWith(first + first)) return first;
+  }
+  return q;
+} 
+ 
+
 function SalesPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -34,8 +50,8 @@ function SalesPageInner() {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [qtyMap, setQtyMap] = useState<Record<number, string>>({});
   const [priceMap, setPriceMap] = useState<Record<number, string>>({});
-  const [search, setSearch] = useState(""); 
-   
+  const [search, setSearch] = useState("");  
+  const [lastScanned, setLastScanned] = useState<Product | null>(null);
   const [paid, setPaid] = useState("");
   const [saleType, setSaleType] = useState<"cash" | "udhar">("cash");
   const [udharName, setUdharName] = useState("");
@@ -104,6 +120,7 @@ function SalesPageInner() {
   useEffect(() => { void loadRecent(period); }, [period]);
 
   async function searchProducts(q: string) {
+    q = cleanScan(q);
     setSearch(q);
     setVisibleCount(PAGE_SIZE);
     const all = await searchProductsFast(q, 200);
@@ -125,33 +142,60 @@ function SalesPageInner() {
     if (exact) return exact;
     const partial = list.find((p) => normalizeBarcode(p.barcode || "").includes(normalizeBarcode(q)) && normalizeBarcode(q).length >= 4);
     if (partial) return partial;
-    return list.length === 1 ? list[0] : null;
+    return null;
   }
 
   async function handleSearchKey(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key !== "Enter") return;
-    const q = search.trim();
-    if (!q) return;
-    const results = await searchProductsFast(q, 20);
-    const db = await getDb();
-    const byBarcode = await db.select<Product[]>("SELECT * FROM products WHERE REPLACE(UPPER(TRIM(barcode)), '-', '') = $1 LIMIT 5", [normalizeBarcode(q)]);
-    const combined = [...byBarcode, ...results.filter((r) => !byBarcode.some((b) => b.id === r.id))];
-    const exact = findByBarcode(q, combined);
-    if (exact) {
-      if (exact.stock <= 0) return alert(`⛔ ${exact.name} Out of Stock hai`);
-      const inCart = Number(cart.find((c) => c.p.id === exact.id)?.qty || 0);
-      if (inCart + (numQty(exact.id) || 1) > exact.stock) return alert(`⛔ ${exact.name} ka sirf ${exact.stock - inCart} bacha hai`);
-      add(exact, numQty(exact.id) || 1);
-      setSearch("");
-      setProducts(await searchProductsFast("", 200));
-      return;
-    }
-    if (/^[A-Z0-9-]{4,}$/i.test(q) && results.length === 0) {
-      if (confirm(`Barcode "${q}" kisi product me nahi mila.\n\nOK dabao to Products page pe naya product banao is barcode ke saath?`)) {
-        router.push(`/dashboard/products?barcode=${encodeURIComponent(q)}`);
-      }
-    }
+  if (e.key !== "Enter") return;
+  const q = cleanScan(search.trim());
+  if (!q) return;
+
+  const isBarcode = /^\d+$/.test(q) || /^[A-Z0-9]+(-[A-Z0-9]+)+$/i.test(q) || /^(?=.*[A-Z])(?=.*\d)[A-Z0-9]{6,}$/i.test(q);
+
+  const results = await searchProductsFast(q, 20);
+  const db = await getDb();
+  const byBarcode = await db.select<Product[]>("SELECT * FROM products WHERE REPLACE(UPPER(TRIM(barcode)), '-', '') = $1 LIMIT 5", [normalizeBarcode(q)]);
+  const combined = [...byBarcode, ...results.filter((r) => !byBarcode.some((b) => b.id === r.id))];
+  const exact = findByBarcode(q, combined);
+
+  // ✅ 1. Barcode scan hua to seedha Cart me
+  if (isBarcode && exact) {
+    if (exact.stock <= 0) return alert(`⛔ ${exact.name} Out of Stock hai`);
+    const inCart = Number(cart.find((c) => c.p.id === exact.id)?.qty || 0);
+    if (inCart + (numQty(exact.id) || 1) > exact.stock) return alert(`⛔ ${exact.name} ka sirf ${exact.stock - inCart} bacha hai`);
+    add(exact, numQty(exact.id) || 1);
+    setLastScanned(exact); // ✅ Product yahan safe hai
+    setSearch(""); // ✅ Box khaali karo taake agli scan chipke nahi
+    setProducts([exact]);
+    setTimeout(() => document.getElementById("pos-search")?.focus(), 0);
+    return;
   }
+
+  // ✅ 2. Naam likha to sirf neeche dikhao, Cart me mat dalo
+  if (!isBarcode) {
+    setLastScanned(null);
+    setProducts(results);
+    return;
+  }
+
+  // ✅ 3. Barcode na mile to sirf alert, koi redirect nahi
+  if (results.length === 0) {
+    alert(`⛔ Barcode "${q}" nahi mila`);
+    setSearch("");
+    setProducts(await searchProductsFast("", 200));
+    return;
+  }
+
+  if (isBarcode && !exact) {
+  alert(`⛔ Barcode "${q}" nahi mila`);
+  setSearch("");
+  setLastScanned(null);
+  setProducts(await searchProductsFast("", 200));
+  return;
+}
+}
+
+
 
   const getQtyText = (id: number) => qtyMap[id] ?? "1";
   const getPriceText = (p: Product) => priceMap[p.id] ?? String(p.price);
@@ -217,7 +261,7 @@ function SalesPageInner() {
         await db.execute("INSERT INTO khata (customer_id, amount, note, type, created_at) VALUES ($1,$2,$3,'udhar', datetime('now','localtime'))", [custId, total, `Sale #${saleId}`]);
       }
       setReceipt({ id: saleId, items: [...cart], total, cash: cashVal, change: changeVal, type: saleType, customerName: custName, date: new Date().toLocaleString() });
-      setCart([]); setPaid(""); setUdharName(""); setUdharPhone(""); setQtyMap({}); setPriceMap({});
+      setCart([]); setPaid(""); setUdharName(""); setUdharPhone(""); setQtyMap({}); setPriceMap({}); setLastScanned(null);
       void load();
     } finally {
       setCheckingOut(false);
@@ -340,7 +384,10 @@ function SalesPageInner() {
                 className="w-full bg-white border px-4 py-3 pr-10 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
                 placeholder="🔍 Scan barcode or name - Madina Mart"
                 value={search}
-                onChange={(e) => void searchProducts(e.target.value)}
+                onChange={(e) => {
+                  if (/^[a-zA-Z ]+$/.test(e.target.value)) setLastScanned(null);
+                  void searchProducts(e.target.value);
+                }}
                 onKeyDown={handleSearchKey}
                 autoFocus
               />
@@ -348,6 +395,7 @@ function SalesPageInner() {
                 <button
                   type="button"
                   onClick={() => {
+                    setLastScanned(null);
                     void searchProducts("");
                     setTimeout(() => document.getElementById("pos-search")?.focus(), 0);
                   }}
@@ -357,6 +405,7 @@ function SalesPageInner() {
                 </button>
               )}
             </div>
+             
              
             <button
               type="button"
@@ -371,13 +420,13 @@ function SalesPageInner() {
           {/* ✅ CLEAN MODE: grid gayab, sirf Scan hint */}
           {cleanMode && (
   <div className="bg-white rounded-2xl border overflow-hidden mt-1">
-    {!search.trim() ? (
+    {!search.trim() && !lastScanned ? (
       <div className="p-8 text-center">
         <p className="text-4xl">📷</p>
         <p className="font-black mt-2 text-lg">Scan ya Search karo</p>
         <p className="text-sm text-slate-500">Upar naam ya barcode likho — neeche table me product aa jayega, phir Add dabao</p>
       </div>
-    ) : displayedProducts.length === 0 ? (
+    ) : !lastScanned && displayedProducts.length === 0 ? (
       <p className="p-8 text-center text-slate-400 text-sm">Koi product nahi mila — naam / barcode dobara likho</p>
     ) : (
       <table className="w-full text-sm">
@@ -391,7 +440,7 @@ function SalesPageInner() {
           </tr>
         </thead>
         <tbody className="divide-y">
-          {displayedProducts.slice(0, 20).map((p) => {
+          {(lastScanned ? [lastScanned] : displayedProducts).slice(0, 20).map((p) => {
             const outOfStock = p.stock <= 0;
             return (
               <tr key={p.id} className={outOfStock ? "opacity-50" : ""}>
