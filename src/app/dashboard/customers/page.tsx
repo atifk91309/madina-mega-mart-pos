@@ -27,9 +27,15 @@ export default function CustomersPage() {
     const sales = await db.select<SaleRow[]>("SELECT * FROM sales WHERE customer_id IS NOT NULL ORDER BY id DESC");
     // ✅ FIX: Saare sale_items nahi, sirf in customers ki sales ke items - IN query
     const saleIds = sales.map((s) => s.id);
-    const items: ItemRow[] = saleIds.length
-      ? await db.select<ItemRow[]>(`SELECT * FROM sale_items WHERE sale_id IN (${saleIds.map((_, i) => `$${i + 1}`).join(",")})`, saleIds)
-      : [];
+    const items: ItemRow[] = [];
+for (let i = 0; i < saleIds.length; i += 900) {
+  const chunk = saleIds.slice(i, i + 900);
+  const rows = await db.select<ItemRow[]>(
+    `SELECT * FROM sale_items WHERE sale_id IN (${chunk.map((_, j) => `$${j + 1}`).join(",")})`,
+    chunk
+  );
+  items.push(...rows);
+}
     const khata = await db.select<KhataEntry[]>("SELECT * FROM khata ORDER BY id DESC");
 
     // ✅ FIX: Map se O(1) lookup - 1000 customers pe bhi foran khulega
@@ -65,28 +71,47 @@ export default function CustomersPage() {
     setList(full);
   }
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load(); }, []);
 
   async function addPayment(id: number, amount: number, current: number) {
-    if (paying !== null) return;
-    if (!amount || amount <= 0) return alert("Wusool amount likho");
-    if (amount > current) return alert(`Payment more than Udhar! Baqi Rs ${current} hai`);
-    if (!confirm(`Rs ${amount} Wusool karna hai? Baqi Rs ${current - amount} reh jayega.`)) return;
-    setPaying(id);
+  if (paying !== null) return;
+  if (!amount || amount <= 0) return alert("Wusool amount likho");
+  if (amount > current) return alert(`Payment more than Udhar! Baqi Rs ${current} hai`);
+  if (!confirm(`Rs ${amount} Wusool karna hai? Baqi Rs ${current - amount} reh jayega.`)) return;
+  setPaying(id);
+  try {
+    const db = await getDb();
+    await db.execute("BEGIN TRANSACTION");
     try {
-      const db = await getDb();
+      const fresh = await db.select<{ total_udhar: number }[]>(
+        "SELECT total_udhar FROM customers WHERE id=$1", [id]
+      );
+      const realUdhar = fresh[0]?.total_udhar ?? 0;
+      if (amount > realUdhar) throw new Error(`Baqi sirf Rs ${realUdhar} hai`);
       await db.execute("UPDATE customers SET total_udhar = MAX(0, total_udhar - $1) WHERE id=$2", [amount, id]);
-      // ✅ FIX: created_at localtime - warna Wusool ki date UTC (5 ghante peeche) aayegi
       await db.execute("INSERT INTO khata (customer_id, amount, note, type, created_at) VALUES ($1,$2,'Payment Received','paid', datetime('now','localtime'))", [id, amount]);
-      setPay((prev) => ({ ...prev, [id]: "" }));
-      alert(`✅ Rs ${amount} Wusool ho gaya — Baqi Rs ${current - amount}`);
-      void load();
-    } finally { setPaying(null); }
-  }
+      await db.execute("COMMIT");
+    } catch (e) {
+      await db.execute("ROLLBACK");
+      throw e;
+    }
+    setPay((prev) => ({ ...prev, [id]: "" }));
+    alert(`✅ Rs ${amount} Wusool ho gaya — Baqi Rs ${current - amount}`);
+    void load();
+  } catch (e) {
+    alert("Wusool fail: " + String(e));
+  } finally { setPaying(null); }
+}
 
   async function handleDeleteCustomer(id: number, name: string) {
     if (!confirm(`⚠️ ${name} ka Khata DELETE karna hai?\n\nIs se Customer + Uska Khata History delete ho jayega.\nSales History (Bills) delete NAHI hogi.\n\nPakka Delete karna hai?`)) return;
+    const db0 = await getDb();
+    const check = await db0.select<{ total_udhar: number }[]>("SELECT total_udhar FROM customers WHERE id=$1", [id]);
+    if ((check[0]?.total_udhar ?? 0) > 0) {
+      alert("Udhar baqi hai — pehle Wusool karo, phir Delete hoga");
+      return;
+    }
     if (!confirm(`Last Confirm: ${name} ko hamesha ke liye delete kar dun?`)) return;
     try {
       const db = await getDb();

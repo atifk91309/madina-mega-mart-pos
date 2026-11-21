@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { getDb } from "@/lib/db";
 
-type TopItem = { name: string; qty: number; total: number; profit: number; stock: number; price: number; cost: number };
+type TopItem = { product_id: number | null; name: string; qty: number; total: number; profit: number; stock: number; price: number; cost: number };
 type Period = "today" | "weekly" | "monthly" | "all";
 
 export default function TopSellingPage() {
@@ -20,19 +20,20 @@ export default function TopSellingPage() {
     // ✅ FIX: Profit SQL me hi - sale wali price minus us waqt ka cost
     // si.cost purani sales me 0 hai, to us waqt products ka cost lo. Product delete ho gaya to bhi row rahegi (LEFT JOIN)
     const rows = await db.select<TopItem[]>(`
-      SELECT si.product_name as name,
-        SUM(si.qty) as qty,
-        SUM(si.qty * si.price) as total,
-        SUM(si.qty * (si.price - COALESCE(NULLIF(si.cost, 0), pr.cost, si.price))) as profit,
-        COALESCE(MAX(pr.stock), 0) as stock,
-        COALESCE(MAX(pr.price), MAX(si.price)) as price,
-        COALESCE(MAX(pr.cost), 0) as cost
-      FROM sale_items si
-      JOIN sales s ON s.id = si.sale_id
-      LEFT JOIN products pr ON pr.name = si.product_name
-      ${where}
-      GROUP BY si.product_name ORDER BY qty DESC LIMIT 50
-    `);
+  SELECT si.product_id as product_id,
+    si.product_name as name,
+    SUM(si.qty) as qty,
+    SUM(si.qty * si.price) as total,
+    SUM(si.qty * (si.price - COALESCE(NULLIF(si.cost, 0), pr.cost, si.price))) as profit,
+    COALESCE(MAX(pr.stock), 0) as stock,
+    COALESCE(MAX(pr.price), MAX(si.price)) as price,
+    COALESCE(MAX(pr.cost), 0) as cost
+  FROM sale_items si
+  JOIN sales s ON s.id = si.sale_id
+  LEFT JOIN products pr ON pr.id = si.product_id
+  ${where}
+  GROUP BY si.product_id, si.product_name ORDER BY qty DESC LIMIT 50
+`);
     setTop(rows.map((r) => ({ ...r, profit: Math.max(0, r.profit ?? 0) })));
   }
   // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -60,7 +61,7 @@ export default function TopSellingPage() {
       </div>
       <div className="bg-white rounded-2xl border mt-4 overflow-hidden">
         {filtered.map((t, i) => (
-          <div key={t.name} className="px-5 py-3 border-b last:border-0">
+          <div key={t.product_id ?? t.name} className="px-5 py-3 border-b last:border-0">
             <div className="flex justify-between items-center">
               <p className="font-bold text-sm">{i + 1}. {t.name} <span className="text-slate-400 font-normal text-xs">• Stock {t.stock}</span></p>
               <div className="text-right"><b className="text-sm">Rs {t.total.toLocaleString()}</b><p className="text-[11px] text-emerald-600 font-bold">Profit Rs {t.profit.toLocaleString()} • {t.qty} pcs</p></div>

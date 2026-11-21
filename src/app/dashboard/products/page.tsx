@@ -113,70 +113,17 @@ export default function ProductsPage() {
     alert(`✅ ${count} nakli barcode saaf ho gaye — ab asal barcode scan karo.`);
     void load();
   }
-
-      // ✅ TEST: 2000 Mega Mart products 1 click me - FIXED (no transaction error)
-  async function loadTestProducts() {
-    if (!confirm("2000 TEST products add kar dun?\n\nYe sirf testing ke liye hain - Price / Barcode nakli honge.\nBaad me Backup Restore se saaf kar dena.")) return;
-    const brands = ["Shan", "National", "Mezan", "Dalda", "Olpers", "Nestle", "Lays", "Pepsi", "Coca Cola", "Tapal", "Lipton", "Dawn", "Sunridge", "Bake Parlor", "Mitchells", "Shezan", "Rooh Afza", "Kissan", "Knorr", "Maggi"];
-    const items = ["Masala", "Biryani Mix", "Karahi Mix", "Atta", "Chawal", "Daal Chana", "Daal Masoor", "Chini", "Patti", "Oil", "Ghee", "Doodh", "Biscuit", "Chips", "Juice", "Cold Drink", "Soap", "Shampoo", "Toothpaste", "Surf", "Tea", "Coffee", "Jam", "Ketchup", "Noodles", "Pasta", "Besan", "Suji", "Salt", "Haldi"];
-    const sizes = ["250g", "500g", "1kg", "2kg", "500ml", "1 Litre", "1.5 Litre", "Small", "Large", "Family Pack"];
-    const cats = ["General", "Cosmetics", "Manyari", "Mobile Accessories", "Other"];
-    const rows: { name: string; price: number; cost: number; barcode: string; stock: number; category: string; company: string }[] = [];
-    for (let i = 0; i < 2000; i++) {
-      const b = brands[i % brands.length];
-      const it = items[Math.floor(i / brands.length) % items.length];
-      const sz = sizes[i % sizes.length];
-      const price = 80 + ((i * 37) % 1200);
-      const cost = Math.round(price * 0.85);
-      rows.push({
-        name: `${b} ${it} ${sz} ${i + 1}`,
-        price,
-        cost,
-        barcode: `8909000${String(100000 + i).slice(1)}`,
-        stock: 5 + (i % 50),
-        category: cats[i % cats.length],
-        company: b,
-      });
-    }
-    setImporting(true);
-    try {
-      const db = await getDb();
-      let added = 0;
-      let skipped = 0;
-      // ✅ FIX: 200-200 karke, 1 fail ho to baaki rukenge nahi - bulkImportProducts use nahi ho raha
-      for (let i = 0; i < rows.length; i += 200) {
-        const chunk = rows.slice(i, i + 200);
-        for (const r of chunk) {
-          try {
-            await db.execute(
-              "INSERT INTO products (name, price, cost, barcode, stock, category, company) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-              [r.name, r.price, r.cost, r.barcode, r.stock, r.category, r.company]
-            );
-            added++;
-          } catch {
-            // Duplicate barcode ho to us 1 ko chhor do
-            skipped++;
-          }
-        }
-        setImportMsg(`Test Import ${Math.min(i + 200, rows.length)} / ${rows.length}... Added: ${added}`);
-      }
-      setImportMsg(`✅ ${added} test products add ho gaye! ${skipped > 0 ? `(${skipped} duplicate skip hue)` : ""}`);
-      void load(0, ""); void loadCategories();
-      setTimeout(() => setImportMsg(""), 5000);
-    } catch (err) {
-      alert("Test Import failed: " + String(err));
-    } finally { setImporting(false); }
-  }
+ 
 
   async function save() {
     if (saving) return;
     if (!form.name || !form.price) return alert("Name & Price required");
     const cleanCat = form.category.trim() || "General";
-    const cleanBarcode = form.barcode.trim();
+    const cleanBarcode = normalizeBarcode(form.barcode.trim());
     if (cleanBarcode) {
       const db = await getDb();
       const dup = await db.select<{ id: number; name: string }[]>(
-        "SELECT id, name FROM products WHERE REPLACE(UPPER(TRIM(barcode)), '-', '') = $1 LIMIT 1",
+        "SELECT id, name FROM products WHERE REPLACE(REPLACE(UPPER(TRIM(barcode)), '-', ''), ' ', '') = $1 LIMIT 1",
         [normalizeBarcode(cleanBarcode)]
       );
       if (dup.length > 0 && dup[0].id !== editId) {
@@ -197,11 +144,12 @@ export default function ProductsPage() {
   // ✅ FIX: Sale history wala product delete nahi hoga - warna purana hisaab kharab hoga
   async function del(id: number, name: string) {
     const db = await getDb();
-    const used = await db.select<{ c: number }[]>("SELECT COUNT(*) as c FROM sale_items WHERE product_name = (SELECT name FROM products WHERE id=$1)", [id]);
+    const used = await db.select<{ c: number }[]>(
+  "SELECT COUNT(*) as c FROM sale_items WHERE product_id=$1", [id]
+);
     if ((used[0]?.c ?? 0) > 0) {
       return alert(`⛔ "${name}" delete nahi ho sakta — iski ${used[0]?.c} sale history hai.\n\nAgar bechna band karna hai to Stock 0 kar do, Edit se. Delete karne se purana hisaab kharab ho jayega.`);
-    }
-    if (!confirm(`"${name}" delete karna hai?`)) return;
+    } 
     await db.execute("DELETE FROM products WHERE id=$1", [id]);
     void load(); void loadCategories();
   }
@@ -338,9 +286,7 @@ export default function ProductsPage() {
             <button onClick={downloadJsonTemplate} className="bg-white text-slate-900 px-3 py-2.5 rounded-xl font-bold text-xs">⬇️ JSON Template</button>
             <button onClick={() => fileRef.current?.click()} disabled={importing} className="bg-emerald-500 px-4 py-2.5 rounded-xl font-bold text-xs disabled:opacity-50">{importing ? "Importing..." : "📥 Import CSV"}</button>
             <button onClick={() => jsonRef.current?.click()} disabled={importing} className="bg-blue-500 px-4 py-2.5 rounded-xl font-bold text-xs disabled:opacity-50">📄 Import JSON</button>
-            <button onClick={() => void loadTestProducts()} disabled={importing} className="bg-purple-500 px-4 py-2.5 rounded-xl font-bold text-xs disabled:opacity-50">
-  🧪 2000 Test Products
-</button>
+             
             <input ref={fileRef} type="file" accept=".csv" className="hidden" onChange={handleCsvFile} />
             <input ref={jsonRef} type="file" accept=".json,application/json" className="hidden" onChange={handleJsonFile} />
           </div>

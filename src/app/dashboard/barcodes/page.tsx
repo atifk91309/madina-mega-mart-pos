@@ -1,13 +1,7 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
-import { getDb, generateCustomBarcode, type Product } from "@/lib/db";
-
-type JsBarcodeFn = (element: SVGElement | string, code: string, options?: Record<string, unknown>) => void;
-declare global {
-  interface Window {
-    JsBarcode?: JsBarcodeFn;
-  }
-}
+import { useEffect, useState } from "react";
+import { getDb, generateCustomBarcode, getAllCategories, type Product } from "@/lib/db";
+import JsBarcode from "jsbarcode";
 
 function normalizeBarcode(v: string): string {
   return v.trim().toUpperCase().replace(/[\s-]/g, "");
@@ -17,23 +11,34 @@ function escapeLike(q: string) {
   return q.replace(/[\\%_]/g, (c) => "\\" + c);
 }
 
-// ✅ FIX: Naam / code seedha HTML me nahi - < > & escape, warna print tootega
+// ✅ Naam / code seedha HTML me nahi - < > & escape, warna print tootega
 function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function makeBarcodeSvg(code: string, height: number): string {
+  const tmp = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  tmp.setAttribute("class", "bc");
+  try {
+    JsBarcode(tmp, code, { format: "CODE128", width: 2.2, height, displayValue: false, margin: 6 });
+  } catch {
+    return "";
+  }
+  return tmp.outerHTML;
 }
 
 export default function BarcodesPage() {
   const [list, setList] = useState<Product[]>([]);
   const [search, setSearch] = useState("");
   const [catFilter, setCatFilter] = useState("All");
+  const [categories, setCategories] = useState<string[]>(["All"]);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [codes, setCodes] = useState<Record<number, string>>({});
-  const [jsLoaded, setJsLoaded] = useState(false);
   const [msg, setMsg] = useState("");
   const [printing, setPrinting] = useState(false);
   const [generating, setGenerating] = useState<number | null>(null);
 
-  // ✅ FIX: DB se filter + LIMIT - 30,000 products ek saath nahi aayenge
+  // ✅ DB se filter + LIMIT - 30,000 products ek saath nahi aayenge
   async function load(q = search, cat = catFilter) {
     const db = await getDb();
     let where = "WHERE 1=1";
@@ -57,35 +62,31 @@ export default function BarcodesPage() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load("", "All");
-    if (window.JsBarcode) { setJsLoaded(true); return; }
-    const s = document.createElement("script");
-    s.src = "https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js";
-    s.onload = () => setJsLoaded(true);
-    s.onerror = () => setJsLoaded(false);
-    document.head.appendChild(s);
+    // ✅ Categories poori DB se - sirf pehle 200 me se nahi
+    void getAllCategories().then((c) => setCategories(["All", ...c])).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const categories = useMemo(() => ["All", ...Array.from(new Set(list.map((p) => p.category || "General")))], [list]);
   const selected = list.filter((p) => selectedIds.includes(p.id));
 
+  // ✅ Preview - npm wali JsBarcode, CDN nahi
   useEffect(() => {
-    if (!jsLoaded) return;
     selected.forEach((p) => {
       const code = codes[p.id];
       if (!code) return;
       const el = document.getElementById(`bc-${p.id}`);
-      if (el instanceof SVGElement && window.JsBarcode) {
-        try { window.JsBarcode(el, code, { format: "CODE128", width: 2.2, height: 56, displayValue: false, margin: 6 }); } catch { /* ignore */ }
+      if (el instanceof SVGElement) {
+        try { JsBarcode(el, code, { format: "CODE128", width: 2.2, height: 56, displayValue: false, margin: 6 }); } catch { /* ignore */ }
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jsLoaded, selectedIds, codes]);
+  }, [selectedIds, codes]);
 
   function toggle(p: Product) {
     setSelectedIds((prev) => prev.includes(p.id) ? prev.filter((id) => id !== p.id) : [...prev, p.id]);
   }
 
-  // ✅ FIX: MAD- wala strong code + DB collision check
+  // ✅ MAD- wala strong code + DB collision check (space + dash dono)
   async function handleGen(p: Product) {
     if (generating !== null) return;
     setGenerating(p.id);
@@ -95,7 +96,7 @@ export default function BarcodesPage() {
       for (let i = 0; i < 5; i++) {
         const cand = generateCustomBarcode();
         const dup = await db.select<{ id: number }[]>(
-          "SELECT id FROM products WHERE REPLACE(UPPER(TRIM(barcode)), '-', '') = $1 AND id != $2 LIMIT 1",
+          "SELECT id FROM products WHERE REPLACE(REPLACE(UPPER(TRIM(barcode)), '-', ''), ' ', '') = $1 AND id != $2 LIMIT 1",
           [normalizeBarcode(cand), p.id]
         );
         if (dup.length === 0) { code = cand; break; }
@@ -108,7 +109,7 @@ export default function BarcodesPage() {
     } finally { setGenerating(null); }
   }
 
-  // ✅ FIX: Save se pehle duplicate check - warna UNIQUE crash pe aadhi save hoti
+  // ✅ Save se pehle duplicate check - warna UNIQUE crash pe aadhi save hoti
   async function saveAll() {
     if (selected.length === 0) return alert("Pehle koi product select karo");
     const db = await getDb();
@@ -120,7 +121,7 @@ export default function BarcodesPage() {
       if (seen.has(norm)) return alert(`⛔ "${p.name}" ka code doosre selected product se mil raha hai — dobara Gen dabao`);
       seen.add(norm);
       const dup = await db.select<{ id: number; name: string }[]>(
-        "SELECT id, name FROM products WHERE REPLACE(UPPER(TRIM(barcode)), '-', '') = $1 AND id != $2 LIMIT 1",
+        "SELECT id, name FROM products WHERE REPLACE(REPLACE(UPPER(TRIM(barcode)), '-', ''), ' ', '') = $1 AND id != $2 LIMIT 1",
         [norm, p.id]
       );
       if (dup.length > 0) return alert(`⛔ "${code}" pehle se "${dup[0].name}" pe hai! ${p.name} ke liye dobara Gen dabao`);
@@ -138,14 +139,13 @@ export default function BarcodesPage() {
     if (selected.length === 0) return alert("Pehle product select karo");
     const missing = selected.filter((p) => !codes[p.id]);
     if (missing.length > 0) return alert(`${missing[0].name} ka Gen dabao — Uska code nahi bana`);
-    if (!window.JsBarcode) return alert("⛔ Barcode library load nahi hui — Internet chahiye (CDN). Pehle internet on karke page refresh karo.");
     setPrinting(true);
 
-    // ✅ STRONG A4: 62mm x 42mm, 3 per row, break-inside avoid, mota barcode
+    // ✅ OFFLINE PRINT: Barcode pehle se SVG bana ke iframe me daalo - CDN ki zaroorat nahi
     const labels = selected.map((p) => `
       <div class="label">
         <div class="pname">${escapeHtml(p.name)}</div>
-        <svg class="bc" data-code="${escapeHtml(codes[p.id])}"></svg>
+        ${makeBarcodeSvg(codes[p.id], 52)}
         <div class="code">${escapeHtml(codes[p.id])}</div>
         <div class="price">Rs ${p.price}</div>
       </div>
@@ -177,20 +177,18 @@ export default function BarcodesPage() {
       .bc{width:100%;height:52px;display:block;margin:0 auto}
       .code{font-size:11px;font-weight:900;letter-spacing:1px;margin-top:1mm}
       .price{font-size:11px;font-weight:900;margin-top:0.5mm}
-    </style><script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script></head><body><div class="sheet">${labels}</div><script>
-      function draw(){ try{ document.querySelectorAll('.bc').forEach(function(el){ JsBarcode(el, el.dataset.code, {format:'CODE128',width:2.2,height:52,displayValue:false,margin:6}); }); }catch(e){} }
-      window.onload=function(){ draw(); setTimeout(function(){ window.focus(); window.print(); }, 700); };
-      setTimeout(draw, 800);
-    <\/script></body></html>`);
+    </style></head><body><div class="sheet">${labels}</div></body></html>`);
     doc.close();
-    setTimeout(() => { setPrinting(false); }, 3000);
+    setTimeout(() => {
+      try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); } catch { /* ignore */ }
+    }, 500);
+    setTimeout(() => { iframe.remove(); setPrinting(false); }, 3000);
   }
 
   return (
     <div className="p-7 max-w-6xl mx-auto">
       <h2 className="text-2xl font-black tracking-tight flex items-center gap-2">🏷️ Barcode Generator</h2>
       <p className="text-slate-500 text-sm mt-1">Manyari • Mobile Accessories • A4 pe 18 stickers (3 x 6) • Strong Barcode - sasta printer pe bhi scan hoga</p>
-      {!jsLoaded && <p className="bg-amber-50 border border-amber-200 text-amber-800 px-3 py-2 rounded-xl text-xs font-bold mt-3">⚠️ Barcode library load ho rahi hai (Internet chahiye) — agar offline ho to Preview / Print me barcode khaali aayega</p>}
 
       <div className="flex gap-2 mt-4">
         <div className="relative flex-1">

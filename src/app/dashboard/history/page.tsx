@@ -59,32 +59,42 @@ export default function History() {
 
   // ✅ FIX: MAX(0) + Khata created_at localtime
   async function handlePartialReturn(sale: SaleWithItems, item: SaleItem, qty: number) {
-    if (qty <= 0 || qty > item.qty) return alert(`Sirf 1 se ${item.qty} tak return ho sakta hai`);
-    if (!confirm(`${item.product_name} x${qty} Return karna hai? Stock wapis ayega.`)) return;
-    const db = await getDb();
-    const refund = item.price * qty;
-    const prod = await db.select<{ cost: number }[]>("SELECT cost FROM products WHERE name=$1 LIMIT 1", [item.product_name]);
-    const profitToCut = Math.max(0, (item.price - (prod[0]?.cost ?? item.price)) * qty);
-    await db.execute("UPDATE products SET stock = stock + $1 WHERE name=$2", [qty, item.product_name]);
+  if (qty <= 0 || qty > item.qty) return alert(`Sirf 1 se ${item.qty} tak return ho sakta hai`);
+  if (!confirm(`${item.product_name} x${qty} Return karna hai? Stock wapis ayega.`)) return;
+  const db = await getDb();
+  const refund = item.price * qty;
+  // ✅ Cost item me pehle se hai — naam se DB me dhoondne ki zaroorat nahi
+  const profitToCut = Math.max(0, (item.price - (item.cost ?? item.price)) * qty);
+  const newTotal = sale.total - refund;
+  const newChange = sale.type === "cash" ? Math.max(0, sale.cash - newTotal) : 0;
+
+  await db.execute("BEGIN TRANSACTION");
+  try {
+    // ✅ Stock + sale_items — ID se, naam se nahi
+    await db.execute("UPDATE products SET stock = stock + $1 WHERE id=$2", [qty, item.product_id]);
     if (sale.type === "udhar" && sale.customer_id) {
       await db.execute("UPDATE customers SET total_udhar = MAX(0, total_udhar - $1) WHERE id=$2", [refund, sale.customer_id]);
       await db.execute("INSERT INTO khata (customer_id, amount, note, type, created_at) VALUES ($1,$2,$3,'paid', datetime('now','localtime'))", [sale.customer_id, refund, `Return Sale #${sale.id} - ${item.product_name} x${qty}`]);
     }
-    if (qty >= item.qty) await db.execute("DELETE FROM sale_items WHERE sale_id=$1 AND product_name=$2", [sale.id, item.product_name]);
-    else await db.execute("UPDATE sale_items SET qty = qty - $1 WHERE sale_id=$2 AND product_name=$3", [qty, sale.id, item.product_name]);
-    const newTotal = sale.total - refund;
-    // ✅ FIX: Change dobara nikalo - Cash sale pe 1800 - 1400 = 400
-    const newChange = sale.type === "cash" ? Math.max(0, sale.cash - newTotal) : 0;
+    if (qty >= item.qty) await db.execute("DELETE FROM sale_items WHERE sale_id=$1 AND product_id=$2", [sale.id, item.product_id]);
+    else await db.execute("UPDATE sale_items SET qty = qty - $1 WHERE sale_id=$2 AND product_id=$3", [qty, sale.id, item.product_id]);
+
+    // ✅ Full Return pe Sale DELETE mat karo — total 0 karke saboot rakho
     if (newTotal <= 0) {
-      await db.execute("DELETE FROM sale_items WHERE sale_id=$1", [sale.id]);
-      await db.execute("DELETE FROM sales WHERE id=$1", [sale.id]);
+      await db.execute("UPDATE sales SET total=$1, profit=$2, change_amt=$3 WHERE id=$4", [0, 0, 0, sale.id]);
     } else {
       await db.execute("UPDATE sales SET total=$1, profit=$2, change_amt=$3 WHERE id=$4", [newTotal, Math.max(0, (sale.profit ?? 0) - profitToCut), newChange, sale.id]);
     }
-    alert(`✅ ${item.product_name} x${qty} Return — Rs ${refund} customer ko WAPIS do${sale.type === "cash" ? ` (Change ab Rs ${newChange} hoga)` : ""}`);
-    setReturnQty({});
-    void load();
+    await db.execute("COMMIT");
+  } catch (e) {
+    await db.execute("ROLLBACK");
+    alert("Return fail: " + String(e));
+    return;
   }
+  alert(`✅ ${item.product_name} x${qty} Return — Rs ${refund} customer ko WAPIS do${sale.type === "cash" ? ` (Change ab Rs ${newChange} hoga)` : ""}`);
+  setReturnQty({});
+  void load();
+}
 
   async function openPrintWindow(html: string, title: string) {
     if (printing) return;
@@ -265,7 +275,7 @@ export default function History() {
                     {expanded === s.id && (
                       <div className="mt-2 bg-slate-50 rounded-xl p-3 text-xs space-y-2">
                         {s.items.map((it, idx) => {
-                          const key = `${s.id}-${it.product_name}`;
+                          const key = `${s.id}-${it.product_id}`;
                           const rq = returnQty[key] ?? 1;
                           return (
                             <div key={idx} className="bg-white rounded-lg p-2 border">

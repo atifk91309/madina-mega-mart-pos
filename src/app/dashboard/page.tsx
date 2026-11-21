@@ -16,46 +16,84 @@ export default function Dashboard() {
   const [recent, setRecent] = useState<RecentSale[]>([]);
   const [top, setTop] = useState<TopItem[]>([]);
   const [topPeriod, setTopPeriod] = useState<Period>("monthly");
-  const [expandedSale, setExpandedSale] = useState<number | null>(null);
-  const [returnQty, setReturnQty] = useState<Record<string, number>>({});
+  const [expandedSale, setExpandedSale] = useState<number | null>(null); 
   const [backupMsg, setBackupMsg] = useState("");
   const [lastBackup, setLastBackup] = useState("");
   const [backupBusy, setBackupBusy] = useState(false);
 
   async function load() {
-    const db = await getDb();
-    const p = await db.select<Product[]>("SELECT * FROM products");
-    // ✅ FIX: Har jagah date('now','localtime') - raat 7 ke baad bhi Today sahi rahega
-    const todaySales = await db.select<Sale[]>("SELECT * FROM sales WHERE date(created_at) = date('now','localtime')");
-    const monthSales = await db.select<Sale[]>("SELECT * FROM sales WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m','now','localtime')");
-    const yearSales = await db.select<Sale[]>("SELECT * FROM sales WHERE strftime('%Y', created_at) = strftime('%Y','now','localtime')");
-    const c = await db.select<Customer[]>("SELECT * FROM customers");
-    setS({
-      products: p.length,
-      stockValue: p.reduce((a, x) => a + x.cost * Math.max(0, x.stock), 0),
-      stockSellValue: p.reduce((a, x) => a + x.price * Math.max(0, x.stock), 0),
-      todaySale: todaySales.reduce((a, x) => a + x.total, 0),
-      todayProfit: todaySales.reduce((a, x) => a + (x.profit ?? 0), 0),
-      monthSale: monthSales.reduce((a, x) => a + x.total, 0),
-      monthProfit: monthSales.reduce((a, x) => a + (x.profit ?? 0), 0),
-      yearSale: yearSales.reduce((a, x) => a + x.total, 0),
-      yearProfit: yearSales.reduce((a, x) => a + (x.profit ?? 0), 0),
-      lowStock: p.filter((x) => x.stock <= 5).length,
-      udhar: c.reduce((a, x) => a + x.total_udhar, 0),
-      todayBills: todaySales.length,
-      monthBills: monthSales.length,
-      yearBills: yearSales.length,
+  const db = await getDb();
+
+  // ✅ FAST: Sirf 1 query me saare SUM / COUNT — 50,000 sales pe bhi 0.1 sec
+  const stats = await db.select<{
+    products: number; stockValue: number; stockSellValue: number;
+    todaySale: number; todayProfit: number; todayBills: number;
+    monthSale: number; monthProfit: number; monthBills: number;
+    yearSale: number; yearProfit: number; yearBills: number;
+    lowStock: number; udhar: number;
+  }[]>(`
+    SELECT
+      (SELECT COUNT(*) FROM products) as products,
+      (SELECT COALESCE(SUM(cost * MAX(stock, 0)), 0) FROM products) as stockValue,
+      (SELECT COALESCE(SUM(price * MAX(stock, 0)), 0) FROM products) as stockSellValue,
+      (SELECT COALESCE(SUM(total), 0) FROM sales WHERE date(created_at) = date('now','localtime')) as todaySale,
+      (SELECT COALESCE(SUM(profit), 0) FROM sales WHERE date(created_at) = date('now','localtime')) as todayProfit,
+      (SELECT COUNT(*) FROM sales WHERE date(created_at) = date('now','localtime')) as todayBills,
+      (SELECT COALESCE(SUM(total), 0) FROM sales WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m','now','localtime')) as monthSale,
+      (SELECT COALESCE(SUM(profit), 0) FROM sales WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m','now','localtime')) as monthProfit,
+      (SELECT COUNT(*) FROM sales WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m','now','localtime')) as monthBills,
+      (SELECT COALESCE(SUM(total), 0) FROM sales WHERE strftime('%Y', created_at) = strftime('%Y','now','localtime')) as yearSale,
+      (SELECT COALESCE(SUM(profit), 0) FROM sales WHERE strftime('%Y', created_at) = strftime('%Y','now','localtime')) as yearProfit,
+      (SELECT COUNT(*) FROM sales WHERE strftime('%Y', created_at) = strftime('%Y','now','localtime')) as yearBills,
+      (SELECT COUNT(*) FROM products WHERE stock <= 5) as lowStock,
+      (SELECT COALESCE(SUM(total_udhar), 0) FROM customers) as udhar
+  `);
+
+  const row = stats[0];
+  setS({
+    products: row.products,
+    stockValue: row.stockValue,
+    stockSellValue: row.stockSellValue,
+    todaySale: row.todaySale,
+    todayProfit: row.todayProfit,
+    monthSale: row.monthSale,
+    monthProfit: row.monthProfit,
+    yearSale: row.yearSale,
+    yearProfit: row.yearProfit,
+    lowStock: row.lowStock,
+    udhar: row.udhar,
+    todayBills: row.todayBills,
+    monthBills: row.monthBills,
+    yearBills: row.yearBills,
+  });
+
+  // ✅ FAST: Low Stock — Sirf 5 lao, poore 3000 mat lao
+  setLow(await db.select<Product[]>(
+    "SELECT * FROM products WHERE stock <= 5 ORDER BY stock ASC LIMIT 5"
+  ));
+
+  // ✅ Recent — Sirf aaj ki 10 bills
+  const customers = await db.select<Customer[]>("SELECT id, name FROM customers");
+  const rows = await db.select<Sale[]>(
+    "SELECT * FROM sales WHERE date(created_at) = date('now','localtime') ORDER BY id DESC LIMIT 10"
+  );
+  const list: RecentSale[] = [];
+  for (const sale of rows) {
+    const items = await db.select<ItemRow[]>(
+      "SELECT * FROM sale_items WHERE sale_id=$1",
+      [sale.id]
+    );
+    list.push({
+      ...sale,
+      items,
+      customerName: sale.customer_id
+        ? customers.find((x) => x.id === sale.customer_id)?.name ?? "Unknown"
+        : "Walk-in",
     });
-    setLow(p.filter((x) => x.stock <= 5).sort((a, b) => a.stock - b.stock).slice(0, 5));
-    const rows = await db.select<Sale[]>("SELECT * FROM sales WHERE date(created_at) = date('now','localtime') ORDER BY id DESC LIMIT 10");
-    const list: RecentSale[] = [];
-    for (const sale of rows) {
-      const items = await db.select<ItemRow[]>("SELECT * FROM sale_items WHERE sale_id=$1", [sale.id]);
-      list.push({ ...sale, items, customerName: sale.customer_id ? c.find((x) => x.id === sale.customer_id)?.name ?? "Unknown" : "Walk-in" });
-    }
-    setRecent(list);
-    void loadTop(topPeriod);
   }
+  setRecent(list);
+  void loadTop(topPeriod);
+}
 
   async function loadTop(p: Period) {
     const db = await getDb();
@@ -129,7 +167,10 @@ export default function Dashboard() {
             ? await db.select<{ id: number }[]>("SELECT id FROM products WHERE REPLACE(UPPER(barcode), '-', '') = $1 LIMIT 1", [(p.barcode || "").trim().toUpperCase().replace(/[\s-]/g, "")])
             : await db.select<{ id: number }[]>("SELECT id FROM products WHERE name = $1 AND (barcode IS NULL OR barcode = '') LIMIT 1", [p.name]);
           if (existing.length > 0) {
-            await db.execute("UPDATE products SET name=$1, price=$2, cost=$3, category=$4, company=$5 WHERE id=$6", [p.name, p.price, p.cost, p.category || "General", p.company || "", existing[0].id]);
+            await db.execute(
+            "UPDATE products SET name=$1, price=$2, cost=$3, barcode=$4, stock=$5, category=$6, company=$7 WHERE id=$8",
+            [p.name, p.price, p.cost, p.barcode || "", p.stock || 0, p.category || "General", p.company || "", existing[0].id]
+          );
           } else {
             await db.execute("INSERT INTO products (name, price, cost, barcode, stock, category, company) VALUES ($1,$2,$3,$4,$5,$6,$7)", [p.name, p.price, p.cost, p.barcode || "", p.stock, p.category || "General", p.company || ""]);
           }
@@ -157,7 +198,10 @@ export default function Dashboard() {
         for (const it of data.sale_items) {
           const exists = await db.select<{ sale_id: number }[]>("SELECT sale_id FROM sale_items WHERE sale_id=$1 AND product_name=$2 LIMIT 1", [it.sale_id, it.product_name]);
           if (exists.length === 0) {
-            await db.execute("INSERT INTO sale_items (sale_id, product_name, qty, price) VALUES ($1,$2,$3,$4)", [it.sale_id, it.product_name, it.qty, it.price]);
+            await db.execute(
+            "INSERT INTO sale_items (sale_id, product_id, product_name, qty, price, cost) VALUES ($1,$2,$3,$4,$5,$6)",
+            [it.sale_id, it.product_id ?? null, it.product_name, it.qty, it.price, it.cost ?? 0]
+          );
           }
         }
       }
@@ -206,33 +250,7 @@ export default function Dashboard() {
 
   useEffect(() => { void loadTop(topPeriod); }, [topPeriod]);
 
-    async function handlePartialReturn(sale: RecentSale, item: ItemRow, qty: number) {
-    if (qty <= 0 || qty > item.qty) return alert(`Sirf 1 se ${item.qty} tak return ho sakta hai`);
-    if (!confirm(`${item.product_name} x${qty} Return karna hai? Stock wapis ayega.`)) return;
-    const db = await getDb();
-    const refund = item.price * qty;
-    const prod = await db.select<{ cost: number }[]>("SELECT cost FROM products WHERE name=$1 LIMIT 1", [item.product_name]);
-    const profitToCut = Math.max(0, (item.price - (prod[0]?.cost ?? item.price)) * qty);
-    await db.execute("UPDATE products SET stock = stock + $1 WHERE name=$2", [qty, item.product_name]);
-    if (sale.type === "udhar" && sale.customer_id) {
-      await db.execute("UPDATE customers SET total_udhar = MAX(0, total_udhar - $1) WHERE id=$2", [refund, sale.customer_id]);
-      await db.execute("INSERT INTO khata (customer_id, amount, note, type, created_at) VALUES ($1,$2,$3,'paid', datetime('now','localtime'))", [sale.customer_id, refund, `Return Sale #${sale.id} - ${item.product_name} x${qty}`]);
-    }
-    if (qty >= item.qty) await db.execute("DELETE FROM sale_items WHERE sale_id=$1 AND product_name=$2", [sale.id, item.product_name]);
-    else await db.execute("UPDATE sale_items SET qty = qty - $1 WHERE sale_id=$2 AND product_name=$3", [qty, sale.id, item.product_name]);
-    const newTotal = sale.total - refund;
-    // ✅ FIX: Change dobara nikalo - Cash sale pe 1800 - 1400 = 400
-    const newChange = sale.type === "cash" ? Math.max(0, sale.cash - newTotal) : 0;
-    if (newTotal <= 0) {
-      await db.execute("DELETE FROM sale_items WHERE sale_id=$1", [sale.id]);
-      await db.execute("DELETE FROM sales WHERE id=$1", [sale.id]);
-    } else {
-      await db.execute("UPDATE sales SET total=$1, profit=$2, change_amt=$3 WHERE id=$4", [newTotal, Math.max(0, (sale.profit ?? 0) - profitToCut), newChange, sale.id]);
-    }
-    alert(`✅ ${item.product_name} x${qty} Return — Rs ${refund} customer ko WAPIS do${sale.type === "cash" ? ` (Change ab Rs ${newChange} hoga)` : ""}`);
-    setReturnQty({});
-    void load();
-  }
+     
 
   const card = "bg-white p-5 rounded-2xl border shadow-sm";
   const cards = [
@@ -339,27 +357,15 @@ export default function Dashboard() {
                   <div><p className="font-black text-xs">Bill #{sale.id} • {new Date(sale.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p><p className="text-[11px] text-slate-500">Profit {sale.profit ?? 0} • {sale.type === "udhar" ? sale.customerName : "Paid"}</p></div>
                   <div className="text-right"><p className="font-black text-xs">Rs {sale.total}</p><p className="text-[11px] text-slate-400">{expandedSale === sale.id ? "▲ Hide" : "▼ Items"}</p></div>
                 </button>
-                {expandedSale === sale.id ? (
-                  <div className="divide-y">
-                    {sale.items.map((it, idx) => {
-                      const key = `${sale.id}-${it.product_name}`;
-                      const rq = returnQty[key] ?? 1;
-                      return (
-                        <div key={idx} className="px-3 py-2">
-                          <div className="flex justify-between"><p className="font-bold text-xs">{it.product_name}</p><b className="text-xs">Rs {it.qty * it.price}</b></div>
-                          <p className="text-[11px] text-slate-500">Qty {it.qty} x Rs {it.price}</p>
-                          <div className="flex gap-1.5 mt-1 items-center">
-                            <div className="flex items-center border rounded-lg overflow-hidden"><button onClick={() => setReturnQty((m) => ({ ...m, [key]: Math.max(1, rq - 1) }))} className="px-2 py-1 bg-slate-100 font-black text-xs">-</button><span className="px-2 text-xs font-bold">{rq}/{it.qty}</span><button onClick={() => setReturnQty((m) => ({ ...m, [key]: Math.min(it.qty, rq + 1) }))} className="px-2 py-1 bg-slate-100 font-black text-xs">+</button></div>
-                            <button onClick={() => void handlePartialReturn(sale, it, rq)} className="flex-1 bg-red-50 text-red-600 py-1.5 rounded-lg text-[11px] font-bold">↩ Return x{rq}</button>
-                            <button onClick={() => void handlePartialReturn(sale, it, it.qty)} className="bg-slate-100 px-2 py-1.5 rounded-lg text-[11px] font-bold">All {it.qty}</button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="px-3 py-2 space-y-0.5">{sale.items.map((it, idx) => (<p key={idx} className="text-xs text-slate-600">• {it.product_name} <b>x{it.qty}</b> — Rs {it.qty * it.price}</p>))}</div>
-                )}
+                 {expandedSale === sale.id && (
+  <div className="px-3 py-2 space-y-0.5">
+    {sale.items.map((it, idx) => (
+      <p key={idx} className="text-xs text-slate-600">
+        • {it.product_name} <b>x{it.qty}</b> — Rs {it.qty * it.price}
+      </p>
+    ))}
+  </div>
+)}
               </div>
             ))}
             {recent.length === 0 && <p className="text-slate-400 py-4 text-sm">Aaj koi sale nahi</p>}

@@ -1,12 +1,12 @@
 "use client";
 import { useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { getDb, searchProductsFast, getOrCreateCustomer, type Product, type Customer } from "@/lib/db";
+import { getDb, searchProductsFast, getOrCreateCustomer, saveSaleAtomic, type Product, type Customer } from "@/lib/db";
 
 type CartItem = { p: Product; qty: number | ""; price: number | "" };
 type Receipt = { id: number; items: CartItem[]; total: number; cash: number; change: number; type: string; customerName: string; date: string };
 type SaleRow = { id: number; total: number; cash: number; change_amt: number; customer_id: number | null; type: string; profit: number; created_at: string };
-type ItemRow = { sale_id: number; product_name: string; qty: number; price: number };
+type ItemRow = { id: number; sale_id: number; product_id: number | null; product_name: string; qty: number; price: number; cost: number };
 type RecentSale = SaleRow & { items: ItemRow[]; customerName: string };
 type Period = "today" | "weekly" | "monthly" | "all";
 type PaperSize = "80mm" | "58mm"; 
@@ -226,47 +226,59 @@ function SalesPageInner() {
   const change = Number(paid || 0) === 0 ? 0 : Number(paid || 0) - total;
 
   async function checkout() {
-    if (checkingOut) return;
-    if (cart.length === 0) return alert("Cart empty");
-    if (cart.some((c) => Number(c.qty || 0) <= 0 || Number(c.price || 0) <= 0)) return alert("Cart me Qty / Price khaali hai — pehle likho");
-    const finalUdharName = udharName.trim() || udharPhone.trim();
-    if (saleType === "udhar" && !finalUdharName) return alert("Udhar ke liye Customer Name likho - UPAR wale box me");
-    if (saleType === "cash" && Number(paid || 0) > 0 && Number(paid) < total) return alert("Cash kam hai! Cash Total se zyada ya barabar hona chahiye");
-    setCheckingOut(true);
-    try {
-      const db = await getDb();
-      for (const c of cart) {
-        const fresh = await db.select<{ stock: number }[]>("SELECT stock FROM products WHERE id=$1", [c.p.id]);
-        const realStock = fresh[0]?.stock ?? c.p.stock;
-        if (Number(c.qty || 0) > realStock) return alert(`⛔ ${c.p.name} ka stock kam hai — Stock: ${realStock}, Cart me: ${c.qty}`);
-      }
-      const cashVal = saleType === "cash" ? (Number(paid || 0) === 0 ? total : Number(paid)) : 0;
-      const changeVal = saleType === "cash" ? Math.max(0, cashVal - total) : 0;
-      let custId: number | null = null;
-      let custName = "Walk-in Customer";
-      if (saleType === "udhar") {
-        const phoneToSave = udharName.trim() ? udharPhone : "";
-        custId = await getOrCreateCustomer(finalUdharName, phoneToSave);
-        custName = finalUdharName;
-        setCustomers(await db.select<Customer[]>("SELECT * FROM customers"));
-      }
-      const res = await db.execute("INSERT INTO sales (total, cash, change_amt, customer_id, type, profit, created_at) VALUES ($1,$2,$3,$4,$5,$6, datetime('now','localtime'))", [total, cashVal, changeVal, custId, saleType, profit]);
-      const saleId = Number(res.lastInsertId ?? 0);
-      for (const c of cart) {
-        await db.execute("INSERT INTO sale_items (sale_id, product_name, qty, price) VALUES ($1,$2,$3,$4)", [saleId, c.p.name, Number(c.qty || 0), Number(c.price || 0)]);
-        await db.execute("UPDATE products SET stock = stock - $1 WHERE id=$2", [Number(c.qty || 0), c.p.id]);
-      }
-      if (saleType === "udhar" && custId) {
-        await db.execute("UPDATE customers SET total_udhar = total_udhar + $1 WHERE id=$2", [total, custId]);
-        await db.execute("INSERT INTO khata (customer_id, amount, note, type, created_at) VALUES ($1,$2,$3,'udhar', datetime('now','localtime'))", [custId, total, `Sale #${saleId}`]);
-      }
-      setReceipt({ id: saleId, items: [...cart], total, cash: cashVal, change: changeVal, type: saleType, customerName: custName, date: new Date().toLocaleString() });
-      setCart([]); setPaid(""); setUdharName(""); setUdharPhone(""); setQtyMap({}); setPriceMap({}); setLastScanned(null);
-      void load();
-    } finally {
-      setCheckingOut(false);
+  if (checkingOut) return;
+  if (cart.length === 0) return alert("Cart empty");
+  if (cart.some((c) => Number(c.qty || 0) <= 0 || Number(c.price || 0) <= 0)) return alert("Cart me Qty / Price khaali hai — pehle likho");
+  const finalUdharName = udharName.trim() || udharPhone.trim();
+  if (saleType === "udhar" && !finalUdharName) return alert("Udhar ke liye Customer Name likho - UPAR wale box me");
+  if (saleType === "cash" && Number(paid || 0) > 0 && Number(paid) < total) return alert("Cash kam hai! Cash Total se zyada ya barabar hona chahiye");
+  setCheckingOut(true);
+  try {
+    const db = await getDb();
+    for (const c of cart) {
+      const fresh = await db.select<{ stock: number }[]>("SELECT stock FROM products WHERE id=$1", [c.p.id]);
+      const realStock = fresh[0]?.stock ?? c.p.stock;
+      if (Number(c.qty || 0) > realStock) return alert(`⛔ ${c.p.name} ka stock kam hai — Stock: ${realStock}, Cart me: ${c.qty}`);
     }
+    const cashVal = saleType === "cash" ? (Number(paid || 0) === 0 ? total : Number(paid)) : 0;
+    const changeVal = saleType === "cash" ? Math.max(0, cashVal - total) : 0;
+    let custId: number | null = null;
+    let custName = "Walk-in Customer";
+    if (saleType === "udhar") {
+      const phoneToSave = udharName.trim() ? udharPhone : "";
+      custId = await getOrCreateCustomer(finalUdharName, phoneToSave);
+      custName = finalUdharName;
+      setCustomers(await db.select<Customer[]>("SELECT * FROM customers"));
+    }
+
+    // ✅ YAHAN CHANGE HAI — Purana INSERT / UPDATE sab khatam, ab sirf 1 call
+    const saleId = await saveSaleAtomic({
+      items: cart.map((c) => ({
+        product_id: c.p.id,
+        product_name: c.p.name,
+        qty: Number(c.qty || 0),
+        price: Number(c.price || 0),
+        cost: c.p.cost,
+      })),
+      total,
+      cash: cashVal,
+      change_amt: changeVal,
+      customer_id: custId,
+      type: saleType,
+      profit,
+      khataAmount: saleType === "udhar" ? total : 0,
+      khataNote: saleType === "udhar" ? `Sale - ${custName}` : "",
+    });
+
+    setReceipt({ id: saleId, items: [...cart], total, cash: cashVal, change: changeVal, type: saleType, customerName: custName, date: new Date().toLocaleString() });
+    setCart([]); setPaid(""); setUdharName(""); setUdharPhone(""); setQtyMap({}); setPriceMap({}); setLastScanned(null);
+    void load();
+  } catch (e) {
+    alert("Sale fail ho gayi: " + String(e));
+  } finally {
+    setCheckingOut(false);
   }
+}
 
   async function handlePartialReturn(sale: RecentSale, item: ItemRow, qty: number) {
     if (qty <= 0) return alert("Return Qty 1 ya zyada likho");
@@ -274,16 +286,19 @@ function SalesPageInner() {
     if (!confirm(`${item.product_name} x${qty} Return karna hai? Stock wapis ayega.`)) return;
     const db = await getDb();
     const refund = item.price * qty;
-    const prod = await db.select<{ cost: number }[]>("SELECT cost FROM products WHERE name=$1 LIMIT 1", [item.product_name]);
-    const cost = prod[0]?.cost ?? item.price;
+    const cost = item.cost ?? item.price;
     const profitToCut = Math.max(0, (item.price - cost) * qty);
-    await db.execute("UPDATE products SET stock = stock + $1 WHERE name=$2", [qty, item.product_name]);
+    if (item.product_id) {
+  await db.execute("UPDATE products SET stock = stock + $1 WHERE id=$2", [qty, item.product_id]);
+} else {
+  await db.execute("UPDATE products SET stock = stock + $1 WHERE name=$2", [qty, item.product_name]);
+}
     if (sale.type === "udhar" && sale.customer_id) {
       await db.execute("UPDATE customers SET total_udhar = MAX(0, total_udhar - $1) WHERE id=$2", [refund, sale.customer_id]);
       await db.execute("INSERT INTO khata (customer_id, amount, note, type, created_at) VALUES ($1,$2,$3,'paid', datetime('now','localtime'))", [sale.customer_id, refund, `Return Sale #${sale.id} - ${item.product_name} x${qty}`]);
     }
-    if (qty >= item.qty) await db.execute("DELETE FROM sale_items WHERE sale_id=$1 AND product_name=$2", [sale.id, item.product_name]);
-    else await db.execute("UPDATE sale_items SET qty = qty - $1 WHERE sale_id=$2 AND product_name=$3", [qty, sale.id, item.product_name]);
+    if (qty >= item.qty) await db.execute("DELETE FROM sale_items WHERE id=$1", [item.id]);
+    else await db.execute("UPDATE sale_items SET qty = qty - $1 WHERE id=$2", [qty, item.id]);
     const newTotal = sale.total - refund;
     const newProfit = Math.max(0, sale.profit - profitToCut);
     const newChange = sale.type === "cash" ? Math.max(0, sale.cash - newTotal) : 0;
