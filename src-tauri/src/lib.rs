@@ -54,6 +54,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_printer::init())
+        // ✅ SINGLE INSTANCE - 2ri window na khule, pehli wali samne aa jaye
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .invoke_handler(tauri::generate_handler![backup_db, get_app_info])
         .setup(|app| {
             if cfg!(debug_assertions) {

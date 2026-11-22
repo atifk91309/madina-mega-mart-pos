@@ -32,3 +32,6 @@ tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-printer = "2"
+
+# --- Single Instance - 2ri window na khule ---
+tauri-plugin-single-instance = "2"
