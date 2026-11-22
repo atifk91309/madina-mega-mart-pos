@@ -11,16 +11,20 @@ function escapeLike(q: string) {
   return q.replace(/[\\%_]/g, (c) => "\\" + c);
 }
 
-// ✅ Naam / code seedha HTML me nahi - < > & escape, warna print tootega
 function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function getBarcodeFormat(code: string): string {
+  const isNumeric = /^\d+$/.test(code) && code.length % 2 === 0;
+  return isNumeric ? "CODE128C" : "CODE128";
 }
 
 function makeBarcodeSvg(code: string, height: number): string {
   const tmp = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   tmp.setAttribute("class", "bc");
   try {
-    JsBarcode(tmp, code, { format: "CODE128", width: 2.2, height, displayValue: false, margin: 6 });
+    JsBarcode(tmp, code, { format: getBarcodeFormat(code), width: 2, height, displayValue: false, margin: 6 });
   } catch {
     return "";
   }
@@ -38,15 +42,16 @@ export default function BarcodesPage() {
   const [printing, setPrinting] = useState(false);
   const [generating, setGenerating] = useState<number | null>(null);
 
-  // ✅ DB se filter + LIMIT - 30,000 products ek saath nahi aayenge
   async function load(q = search, cat = catFilter) {
     const db = await getDb();
     let where = "WHERE 1=1";
     const params: unknown[] = [];
     if (q.trim()) {
-      const like = `%${escapeLike(q.trim())}%`;
-      where += " AND (name LIKE $1 ESCAPE '\\' OR barcode LIKE $1 ESCAPE '\\')";
-      params.push(like);
+      const raw = q.trim();
+      const like = `%${escapeLike(raw)}%`;
+      const barcodeLike = `%${escapeLike(normalizeBarcode(raw))}%`;
+      where += " AND (name LIKE $1 ESCAPE '\\' OR REPLACE(REPLACE(UPPER(TRIM(barcode)), '-', ''), ' ', '') LIKE $2 ESCAPE '\\')";
+      params.push(like, barcodeLike);
     }
     if (cat !== "All") {
       where += ` AND category = $${params.length + 1}`;
@@ -62,21 +67,19 @@ export default function BarcodesPage() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load("", "All");
-    // ✅ Categories poori DB se - sirf pehle 200 me se nahi
     void getAllCategories().then((c) => setCategories(["All", ...c])).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const selected = list.filter((p) => selectedIds.includes(p.id));
 
-  // ✅ Preview - npm wali JsBarcode, CDN nahi
   useEffect(() => {
     selected.forEach((p) => {
       const code = codes[p.id];
       if (!code) return;
       const el = document.getElementById(`bc-${p.id}`);
       if (el instanceof SVGElement) {
-        try { JsBarcode(el, code, { format: "CODE128", width: 2.2, height: 56, displayValue: false, margin: 6 }); } catch { /* ignore */ }
+        try { JsBarcode(el, code, { format: getBarcodeFormat(code), width: 2, height: 56, displayValue: false, margin: 6 }); } catch { /* ignore */ }
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -86,7 +89,6 @@ export default function BarcodesPage() {
     setSelectedIds((prev) => prev.includes(p.id) ? prev.filter((id) => id !== p.id) : [...prev, p.id]);
   }
 
-  // ✅ MAD- wala strong code + DB collision check (space + dash dono)
   async function handleGen(p: Product) {
     if (generating !== null) return;
     setGenerating(p.id);
@@ -109,7 +111,6 @@ export default function BarcodesPage() {
     } finally { setGenerating(null); }
   }
 
-  // ✅ Save se pehle duplicate check - warna UNIQUE crash pe aadhi save hoti
   async function saveAll() {
     if (selected.length === 0) return alert("Pehle koi product select karo");
     const db = await getDb();
@@ -141,7 +142,6 @@ export default function BarcodesPage() {
     if (missing.length > 0) return alert(`${missing[0].name} ka Gen dabao — Uska code nahi bana`);
     setPrinting(true);
 
-    // ✅ OFFLINE PRINT: Barcode pehle se SVG bana ke iframe me daalo - CDN ki zaroorat nahi
     const labels = selected.map((p) => `
       <div class="label">
         <div class="pname">${escapeHtml(p.name)}</div>
@@ -245,7 +245,7 @@ export default function BarcodesPage() {
           <div className="bg-white rounded-2xl border p-5 mt-4">
             <div className="grid grid-cols-3 gap-4">
               {selected.map((p) => (
-                <div key={p.id} className="border rounded-xl p-4 text-center flex flex-col gap-0">
+                <div key={p.id} className="border rounded-xl p-4 text-center flex flex-col gap-0 overflow-hidden">
                   <p className="text-[11px] font-bold leading-tight mb-2">{p.name}</p>
                   {codes[p.id] ? <svg id={`bc-${p.id}`} className="mx-auto w-full block m-0"></svg> : <p className="text-xs text-red-500 py-4">Gen dabao</p>}
                   <p className="text-[11px] font-bold mt-0">{codes[p.id] || "—"}</p>

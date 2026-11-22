@@ -79,10 +79,12 @@ export default function ProductsPage() {
     let where = "WHERE 1=1";
     const params: unknown[] = [];
     if (q.trim()) {
-      const like = `%${escapeLike(q.trim())}%`;
-      // FIX: $1,$1,$1 ki jagah $1,$2,$3
-      where += " AND (name LIKE $1 ESCAPE '\\' OR barcode LIKE $2 ESCAPE '\\' OR category LIKE $3 ESCAPE '\\')";
-      params.push(like, like, like);
+      const raw = q.trim();
+      const like = `%${escapeLike(raw)}%`;
+      // Barcode ke liye normalized version - MAD- -> MAD, space khatam
+      const barcodeLike = `%${escapeLike(normalizeBarcode(raw))}%`;
+      where += " AND (name LIKE $1 ESCAPE '\\' OR REPLACE(REPLACE(UPPER(TRIM(barcode)), '-', ''), ' ', '') LIKE $2 ESCAPE '\\' OR category LIKE $3 ESCAPE '\\')";
+      params.push(like, barcodeLike, like);
     }
     if (cat !== "All") {
       where += ` AND category = $${params.length + 1}`;
@@ -144,8 +146,8 @@ export default function ProductsPage() {
       return alert(`⛔ "${name}" delete nahi ho sakta — iski ${used[0]?.c} sale history hai.\n\nAgar bechna band karna hai to Stock 0 kar do, Edit se. Delete karne se purana hisaab kharab ho jayega.`);
     }
     // FIX: confirm + queue wala deleteProduct
-    if (!confirm(`"${name}" delete kar dun?`)) return;
-    await deleteProduct(id);
+     await deleteProduct(id);
+    alert(`"${name}" deleted successfully`);
     void load(); void loadCategories();
   }
 
