@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { getDb, bulkImportProducts, getAllCategories, type Product } from "@/lib/db";
+import { getDb, bulkImportProducts, getAllCategories, saveProduct, deleteProduct, type Product } from "@/lib/db";
 
 const DEFAULT_CATEGORIES = ["General", "Mobile Accessories", "Manyari", "Cosmetics", "Other"];
 
@@ -29,7 +29,6 @@ function normalizeBarcode(v: string): string {
   return v.trim().toUpperCase().replace(/[\s-]/g, "");
 }
 
-// ✅ LIKE me % _ \ escape - "%" search karne pe poori list nahi aayegi
 function escapeLike(q: string) {
   return q.replace(/[\\%_]/g, (c) => "\\" + c);
 }
@@ -77,13 +76,13 @@ export default function ProductsPage() {
   async function load(p = page, q = search, cat = catFilter) {
     const db = await getDb();
     const offset = p * PAGE_SIZE;
-    // ✅ FIX: Sab kuch parameter se - category bhi, SQL me string jorna band
     let where = "WHERE 1=1";
     const params: unknown[] = [];
     if (q.trim()) {
       const like = `%${escapeLike(q.trim())}%`;
-      where += " AND (name LIKE $1 ESCAPE '\\' OR barcode LIKE $1 ESCAPE '\\' OR category LIKE $1 ESCAPE '\\')";
-      params.push(like);
+      // FIX: $1,$1,$1 ki jagah $1,$2,$3
+      where += " AND (name LIKE $1 ESCAPE '\\' OR barcode LIKE $2 ESCAPE '\\' OR category LIKE $3 ESCAPE '\\')";
+      params.push(like, like, like);
     }
     if (cat !== "All") {
       where += ` AND category = $${params.length + 1}`;
@@ -102,19 +101,6 @@ export default function ProductsPage() {
   function onCat(c: string) { setCatFilter(c); setPage(0); void load(0, search, c); }
   function clearSearch() { void onSearch(""); }
 
-  // ✅ NAYA: Purane nakli MAD-... barcode saaf karo - taake asal barcode dobara scan ho sake
-  async function clearFakeBarcodes() {
-    const db = await getDb();
-    const rows = await db.select<{ c: number }[]>("SELECT COUNT(*) as c FROM products WHERE UPPER(barcode) LIKE 'MAD-%'");
-    const count = rows[0]?.c ?? 0;
-    if (count === 0) return alert("✅ Koi nakli MAD-... barcode nahi mila — sab saaf hai.");
-    if (!confirm(`${count} products pe nakli MAD-... barcode laga hua hai.\n\nYe sab BLANK kar dun?\n\nUske baad un products pe asal packet ka barcode scan karke Edit se save karna.`)) return;
-    await db.execute("UPDATE products SET barcode = '' WHERE UPPER(barcode) LIKE 'MAD-%'");
-    alert(`✅ ${count} nakli barcode saaf ho gaye — ab asal barcode scan karo.`);
-    void load();
-  }
- 
-
   async function save() {
     if (saving) return;
     if (!form.name || !form.price) return alert("Name & Price required");
@@ -132,25 +118,34 @@ export default function ProductsPage() {
     }
     setSaving(true);
     try {
-      const db = await getDb();
-      if (editId) await db.execute("UPDATE products SET name=$1, price=$2, cost=$3, barcode=$4, stock=$5, category=$6, company=$7 WHERE id=$8", [form.name, Number(form.price), Number(form.cost || 0), cleanBarcode, Number(form.stock || 0), cleanCat, form.company, editId]);
-      else await db.execute("INSERT INTO products (name, price, cost, barcode, stock, category, company) VALUES ($1,$2,$3,$4,$5,$6,$7)", [form.name, Number(form.price), Number(form.cost || 0), cleanBarcode, Number(form.stock || 0), cleanCat, form.company]);
+      // FIX: direct db.execute ki jagah queue wala saveProduct
+      await saveProduct({
+        id: editId,
+        name: form.name,
+        price: Number(form.price),
+        cost: Number(form.cost || 0),
+        barcode: cleanBarcode,
+        stock: Number(form.stock || 0),
+        category: cleanCat,
+        company: form.company,
+      });
       setForm({ name: "", price: "", cost: "", barcode: "", stock: "", category: "General", company: "" }); setEditId(null); setBarcodeNotice("");
       void load(); void loadCategories();
     } finally { setSaving(false); }
   }
   function edit(p: Product) { setEditId(p.id); setBarcodeNotice(""); setForm({ name: p.name, price: String(p.price), cost: String(p.cost), barcode: p.barcode, stock: String(p.stock), category: p.category || "General", company: p.company || "" }); window.scrollTo({ top: 0, behavior: "smooth" }); }
 
-  // ✅ FIX: Sale history wala product delete nahi hoga - warna purana hisaab kharab hoga
   async function del(id: number, name: string) {
     const db = await getDb();
     const used = await db.select<{ c: number }[]>(
-  "SELECT COUNT(*) as c FROM sale_items WHERE product_id=$1", [id]
-);
+      "SELECT COUNT(*) as c FROM sale_items WHERE product_id=$1", [id]
+    );
     if ((used[0]?.c ?? 0) > 0) {
       return alert(`⛔ "${name}" delete nahi ho sakta — iski ${used[0]?.c} sale history hai.\n\nAgar bechna band karna hai to Stock 0 kar do, Edit se. Delete karne se purana hisaab kharab ho jayega.`);
-    } 
-    await db.execute("DELETE FROM products WHERE id=$1", [id]);
+    }
+    // FIX: confirm + queue wala deleteProduct
+    if (!confirm(`"${name}" delete kar dun?`)) return;
+    await deleteProduct(id);
     void load(); void loadCategories();
   }
 
@@ -286,7 +281,6 @@ export default function ProductsPage() {
             <button onClick={downloadJsonTemplate} className="bg-white text-slate-900 px-3 py-2.5 rounded-xl font-bold text-xs">⬇️ JSON Template</button>
             <button onClick={() => fileRef.current?.click()} disabled={importing} className="bg-emerald-500 px-4 py-2.5 rounded-xl font-bold text-xs disabled:opacity-50">{importing ? "Importing..." : "📥 Import CSV"}</button>
             <button onClick={() => jsonRef.current?.click()} disabled={importing} className="bg-blue-500 px-4 py-2.5 rounded-xl font-bold text-xs disabled:opacity-50">📄 Import JSON</button>
-             
             <input ref={fileRef} type="file" accept=".csv" className="hidden" onChange={handleCsvFile} />
             <input ref={jsonRef} type="file" accept=".json,application/json" className="hidden" onChange={handleJsonFile} />
           </div>
@@ -296,7 +290,6 @@ export default function ProductsPage() {
       <div className="bg-white p-5 rounded-2xl border mt-4">
         <div className="flex justify-between items-center mb-3">
           <h3 className="font-black">{editId ? "✏️ Edit Product" : "➕ Add New Product - Madina Mega Mart Shewa"}</h3>
-          <button onClick={() => void clearFakeBarcodes()} className="bg-amber-100 text-amber-800 px-3 py-2 rounded-xl text-xs font-bold shrink-0">🧹 Purane MAD-... Saaf Karo</button>
         </div>
         {barcodeNotice && <p className="bg-amber-50 border border-amber-200 text-amber-800 px-3 py-2 rounded-xl text-sm font-bold mb-3">{barcodeNotice}</p>}
         <div className="grid grid-cols-5 gap-3">

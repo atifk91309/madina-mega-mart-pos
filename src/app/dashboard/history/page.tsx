@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { getDb, type Sale, type SaleItem } from "@/lib/db";
+import { getDb, processReturn, type Sale, type SaleItem } from "@/lib/db";
 
 type SaleWithItems = Sale & { items: SaleItem[]; customerName: string };
 type Period = "today" | "weekly" | "monthly" | "all";
@@ -57,43 +57,21 @@ export default function History() {
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load(); }, []);
 
-  // ✅ FIX: MAX(0) + Khata created_at localtime
   async function handlePartialReturn(sale: SaleWithItems, item: SaleItem, qty: number) {
   if (qty <= 0 || qty > item.qty) return alert(`Sirf 1 se ${item.qty} tak return ho sakta hai`);
   if (!confirm(`${item.product_name} x${qty} Return karna hai? Stock wapis ayega.`)) return;
-  const db = await getDb();
-  const refund = item.price * qty;
-  // ✅ Cost item me pehle se hai — naam se DB me dhoondne ki zaroorat nahi
-  const profitToCut = Math.max(0, (item.price - (item.cost ?? item.price)) * qty);
-  const newTotal = sale.total - refund;
-  const newChange = sale.type === "cash" ? Math.max(0, sale.cash - newTotal) : 0;
-
-  await db.execute("BEGIN TRANSACTION");
   try {
-    // ✅ Stock + sale_items — ID se, naam se nahi
-    await db.execute("UPDATE products SET stock = stock + $1 WHERE id=$2", [qty, item.product_id]);
-    if (sale.type === "udhar" && sale.customer_id) {
-      await db.execute("UPDATE customers SET total_udhar = MAX(0, total_udhar - $1) WHERE id=$2", [refund, sale.customer_id]);
-      await db.execute("INSERT INTO khata (customer_id, amount, note, type, created_at) VALUES ($1,$2,$3,'paid', datetime('now','localtime'))", [sale.customer_id, refund, `Return Sale #${sale.id} - ${item.product_name} x${qty}`]);
-    }
-    if (qty >= item.qty) await db.execute("DELETE FROM sale_items WHERE sale_id=$1 AND product_id=$2", [sale.id, item.product_id]);
-    else await db.execute("UPDATE sale_items SET qty = qty - $1 WHERE sale_id=$2 AND product_id=$3", [qty, sale.id, item.product_id]);
-
-    // ✅ Full Return pe Sale DELETE mat karo — total 0 karke saboot rakho
-    if (newTotal <= 0) {
-      await db.execute("UPDATE sales SET total=$1, profit=$2, change_amt=$3 WHERE id=$4", [0, 0, 0, sale.id]);
-    } else {
-      await db.execute("UPDATE sales SET total=$1, profit=$2, change_amt=$3 WHERE id=$4", [newTotal, Math.max(0, (sale.profit ?? 0) - profitToCut), newChange, sale.id]);
-    }
-    await db.execute("COMMIT");
-  } catch (e) {
-    await db.execute("ROLLBACK");
-    alert("Return fail: " + String(e));
-    return;
-  }
-  alert(`✅ ${item.product_name} x${qty} Return — Rs ${refund} customer ko WAPIS do${sale.type === "cash" ? ` (Change ab Rs ${newChange} hoga)` : ""}`);
-  setReturnQty({});
-  void load();
+    await processReturn({
+      saleId: sale.id, itemId: item.id,
+      productId: item.product_id ?? null, productName: item.product_name,
+      qty, itemQty: item.qty, price: item.price, cost: item.cost ?? item.price,
+      saleType: sale.type, customerId: sale.customer_id,
+      saleTotal: sale.total, saleProfit: sale.profit ?? 0,
+    });
+    alert(`✅ ${item.product_name} x${qty} Return — Rs ${item.price * qty} customer ko WAPIS do`);
+    setReturnQty({});
+    void load();
+  } catch (e) { alert("Return fail: " + String(e)); }
 }
 
   async function openPrintWindow(html: string, title: string) {

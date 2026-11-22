@@ -20,9 +20,15 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   // ✅ CLEAN POS: /dashboard/sales?clean=1 ho to sidebar gayab
   const isCleanPOS = path === "/dashboard/sales" && searchParams.get("clean") === "1";
 
+  // ✅ FIX: Click pe active link ka background rahega
+  const isActive = (href: string) => {
+    if (href === "/dashboard") return path === "/dashboard" || path === "/dashboard/";
+    return path === href || path.startsWith(href + "/");
+  };
+
   const linkCls = (href: string) =>
     `flex items-center gap-3 px-4 py-2.5 rounded-xl font-bold text-sm transition ${
-      path === href ? "bg-white text-slate-900" : "text-slate-300 hover:bg-white/10 hover:text-white"
+      isActive(href) ? "bg-white text-slate-900" : "text-slate-300 hover:bg-white/10 hover:text-white"
     }`;
 
   return (
@@ -35,7 +41,7 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
           </div>
           <nav className="space-y-1 mt-4">
             {LINKS.map((l) => (
-              <Link key={l.href} href={l.href} className={linkCls(l.href)}>
+              <Link key={l.href} href={l.href} className={linkCls(l.href)} aria-current={isActive(l.href) ? "page" : undefined}>
                 <span>{l.icon}</span> {l.label}
               </Link>
             ))}

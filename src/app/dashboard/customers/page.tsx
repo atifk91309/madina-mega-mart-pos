@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { getDb, type Customer, type KhataEntry } from "@/lib/db";
+import { getDb, addKhataPayment, deleteCustomerKhata, type Customer, type KhataEntry } from "@/lib/db";
 
 type SaleRow = { id: number; total: number; customer_id: number | null; type: string; created_at: string };
 type ItemRow = { sale_id: number; product_name: string; qty: number; price: number };
@@ -81,23 +81,9 @@ for (let i = 0; i < saleIds.length; i += 900) {
   if (!confirm(`Rs ${amount} Wusool karna hai? Baqi Rs ${current - amount} reh jayega.`)) return;
   setPaying(id);
   try {
-    const db = await getDb();
-    await db.execute("BEGIN TRANSACTION");
-    try {
-      const fresh = await db.select<{ total_udhar: number }[]>(
-        "SELECT total_udhar FROM customers WHERE id=$1", [id]
-      );
-      const realUdhar = fresh[0]?.total_udhar ?? 0;
-      if (amount > realUdhar) throw new Error(`Baqi sirf Rs ${realUdhar} hai`);
-      await db.execute("UPDATE customers SET total_udhar = MAX(0, total_udhar - $1) WHERE id=$2", [amount, id]);
-      await db.execute("INSERT INTO khata (customer_id, amount, note, type, created_at) VALUES ($1,$2,'Payment Received','paid', datetime('now','localtime'))", [id, amount]);
-      await db.execute("COMMIT");
-    } catch (e) {
-      await db.execute("ROLLBACK");
-      throw e;
-    }
+    const remaining = await addKhataPayment(id, amount);
     setPay((prev) => ({ ...prev, [id]: "" }));
-    alert(`✅ Rs ${amount} Wusool ho gaya — Baqi Rs ${current - amount}`);
+    alert(`✅ Rs ${amount} Wusool ho gaya — Baqi Rs ${remaining}`);
     void load();
   } catch (e) {
     alert("Wusool fail: " + String(e));
@@ -105,24 +91,16 @@ for (let i = 0; i < saleIds.length; i += 900) {
 }
 
   async function handleDeleteCustomer(id: number, name: string) {
-    if (!confirm(`⚠️ ${name} ka Khata DELETE karna hai?\n\nIs se Customer + Uska Khata History delete ho jayega.\nSales History (Bills) delete NAHI hogi.\n\nPakka Delete karna hai?`)) return;
-    const db0 = await getDb();
-    const check = await db0.select<{ total_udhar: number }[]>("SELECT total_udhar FROM customers WHERE id=$1", [id]);
-    if ((check[0]?.total_udhar ?? 0) > 0) {
-      alert("Udhar baqi hai — pehle Wusool karo, phir Delete hoga");
-      return;
-    }
-    if (!confirm(`Last Confirm: ${name} ko hamesha ke liye delete kar dun?`)) return;
-    try {
-      const db = await getDb();
-      await db.execute("DELETE FROM khata WHERE customer_id=$1", [id]);
-      await db.execute("DELETE FROM customers WHERE id=$1", [id]);
-      alert(`✅ ${name} ka Khata delete ho gaya`);
-      void load();
-    } catch (err) {
-      alert("Delete failed: " + String(err));
-    }
+  if (!confirm(`⚠️ ${name} ka Khata DELETE karna hai?\n\nIs se Customer + Uska Khata History delete ho jayega.\nSales History (Bills) delete NAHI hogi.\n\nPakka Delete karna hai?`)) return;
+  if (!confirm(`Last Confirm: ${name} ko hamesha ke liye delete kar dun?`)) return;
+  try {
+    await deleteCustomerKhata(id);
+    alert(`✅ ${name} ka Khata delete ho gaya`);
+    void load();
+  } catch (err) {
+    alert("Delete failed: " + String(err));
   }
+}
 
   async function printCustomer(c: CustomerFull) {
     if (printing) return;

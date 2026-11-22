@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { getDb, type Product, type Customer, type Sale } from "@/lib/db";
+import { getDb, checkpointDb, restoreBackup, type Product, type Customer, type Sale } from "@/lib/db";
 import { invoke } from "@tauri-apps/api/core";
 import Link from "next/link";
 
@@ -16,84 +16,81 @@ export default function Dashboard() {
   const [recent, setRecent] = useState<RecentSale[]>([]);
   const [top, setTop] = useState<TopItem[]>([]);
   const [topPeriod, setTopPeriod] = useState<Period>("monthly");
-  const [expandedSale, setExpandedSale] = useState<number | null>(null); 
+  const [expandedSale, setExpandedSale] = useState<number | null>(null);
   const [backupMsg, setBackupMsg] = useState("");
   const [lastBackup, setLastBackup] = useState("");
   const [backupBusy, setBackupBusy] = useState(false);
 
   async function load() {
-  const db = await getDb();
+    const db = await getDb();
 
-  // ✅ FAST: Sirf 1 query me saare SUM / COUNT — 50,000 sales pe bhi 0.1 sec
-  const stats = await db.select<{
-    products: number; stockValue: number; stockSellValue: number;
-    todaySale: number; todayProfit: number; todayBills: number;
-    monthSale: number; monthProfit: number; monthBills: number;
-    yearSale: number; yearProfit: number; yearBills: number;
-    lowStock: number; udhar: number;
-  }[]>(`
-    SELECT
-      (SELECT COUNT(*) FROM products) as products,
-      (SELECT COALESCE(SUM(cost * MAX(stock, 0)), 0) FROM products) as stockValue,
-      (SELECT COALESCE(SUM(price * MAX(stock, 0)), 0) FROM products) as stockSellValue,
-      (SELECT COALESCE(SUM(total), 0) FROM sales WHERE date(created_at) = date('now','localtime')) as todaySale,
-      (SELECT COALESCE(SUM(profit), 0) FROM sales WHERE date(created_at) = date('now','localtime')) as todayProfit,
-      (SELECT COUNT(*) FROM sales WHERE date(created_at) = date('now','localtime')) as todayBills,
-      (SELECT COALESCE(SUM(total), 0) FROM sales WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m','now','localtime')) as monthSale,
-      (SELECT COALESCE(SUM(profit), 0) FROM sales WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m','now','localtime')) as monthProfit,
-      (SELECT COUNT(*) FROM sales WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m','now','localtime')) as monthBills,
-      (SELECT COALESCE(SUM(total), 0) FROM sales WHERE strftime('%Y', created_at) = strftime('%Y','now','localtime')) as yearSale,
-      (SELECT COALESCE(SUM(profit), 0) FROM sales WHERE strftime('%Y', created_at) = strftime('%Y','now','localtime')) as yearProfit,
-      (SELECT COUNT(*) FROM sales WHERE strftime('%Y', created_at) = strftime('%Y','now','localtime')) as yearBills,
-      (SELECT COUNT(*) FROM products WHERE stock <= 5) as lowStock,
-      (SELECT COALESCE(SUM(total_udhar), 0) FROM customers) as udhar
-  `);
+    const stats = await db.select<{
+      products: number; stockValue: number; stockSellValue: number;
+      todaySale: number; todayProfit: number; todayBills: number;
+      monthSale: number; monthProfit: number; monthBills: number;
+      yearSale: number; yearProfit: number; yearBills: number;
+      lowStock: number; udhar: number;
+    }[]>(`
+      SELECT
+        (SELECT COUNT(*) FROM products) as products,
+        (SELECT COALESCE(SUM(cost * MAX(stock, 0)), 0) FROM products) as stockValue,
+        (SELECT COALESCE(SUM(price * MAX(stock, 0)), 0) FROM products) as stockSellValue,
+        (SELECT COALESCE(SUM(total), 0) FROM sales WHERE date(created_at) = date('now','localtime')) as todaySale,
+        (SELECT COALESCE(SUM(profit), 0) FROM sales WHERE date(created_at) = date('now','localtime')) as todayProfit,
+        (SELECT COUNT(*) FROM sales WHERE date(created_at) = date('now','localtime')) as todayBills,
+        (SELECT COALESCE(SUM(total), 0) FROM sales WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m','now','localtime')) as monthSale,
+        (SELECT COALESCE(SUM(profit), 0) FROM sales WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m','now','localtime')) as monthProfit,
+        (SELECT COUNT(*) FROM sales WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m','now','localtime')) as monthBills,
+        (SELECT COALESCE(SUM(total), 0) FROM sales WHERE strftime('%Y', created_at) = strftime('%Y','now','localtime')) as yearSale,
+        (SELECT COALESCE(SUM(profit), 0) FROM sales WHERE strftime('%Y', created_at) = strftime('%Y','now','localtime')) as yearProfit,
+        (SELECT COUNT(*) FROM sales WHERE strftime('%Y', created_at) = strftime('%Y','now','localtime')) as yearBills,
+        (SELECT COUNT(*) FROM products WHERE stock <= 5) as lowStock,
+        (SELECT COALESCE(SUM(total_udhar), 0) FROM customers) as udhar
+    `);
 
-  const row = stats[0];
-  setS({
-    products: row.products,
-    stockValue: row.stockValue,
-    stockSellValue: row.stockSellValue,
-    todaySale: row.todaySale,
-    todayProfit: row.todayProfit,
-    monthSale: row.monthSale,
-    monthProfit: row.monthProfit,
-    yearSale: row.yearSale,
-    yearProfit: row.yearProfit,
-    lowStock: row.lowStock,
-    udhar: row.udhar,
-    todayBills: row.todayBills,
-    monthBills: row.monthBills,
-    yearBills: row.yearBills,
-  });
-
-  // ✅ FAST: Low Stock — Sirf 5 lao, poore 3000 mat lao
-  setLow(await db.select<Product[]>(
-    "SELECT * FROM products WHERE stock <= 5 ORDER BY stock ASC LIMIT 5"
-  ));
-
-  // ✅ Recent — Sirf aaj ki 10 bills
-  const customers = await db.select<Customer[]>("SELECT id, name FROM customers");
-  const rows = await db.select<Sale[]>(
-    "SELECT * FROM sales WHERE date(created_at) = date('now','localtime') ORDER BY id DESC LIMIT 10"
-  );
-  const list: RecentSale[] = [];
-  for (const sale of rows) {
-    const items = await db.select<ItemRow[]>(
-      "SELECT * FROM sale_items WHERE sale_id=$1",
-      [sale.id]
-    );
-    list.push({
-      ...sale,
-      items,
-      customerName: sale.customer_id
-        ? customers.find((x) => x.id === sale.customer_id)?.name ?? "Unknown"
-        : "Walk-in",
+    const row = stats[0];
+    setS({
+      products: row.products,
+      stockValue: row.stockValue,
+      stockSellValue: row.stockSellValue,
+      todaySale: row.todaySale,
+      todayProfit: row.todayProfit,
+      monthSale: row.monthSale,
+      monthProfit: row.monthProfit,
+      yearSale: row.yearSale,
+      yearProfit: row.yearProfit,
+      lowStock: row.lowStock,
+      udhar: row.udhar,
+      todayBills: row.todayBills,
+      monthBills: row.monthBills,
+      yearBills: row.yearBills,
     });
+
+    setLow(await db.select<Product[]>(
+      "SELECT * FROM products WHERE stock <= 5 ORDER BY stock ASC LIMIT 5"
+    ));
+
+    const customers = await db.select<Customer[]>("SELECT id, name FROM customers");
+    const rows = await db.select<Sale[]>(
+      "SELECT * FROM sales WHERE date(created_at) = date('now','localtime') ORDER BY id DESC LIMIT 10"
+    );
+    const list: RecentSale[] = [];
+    for (const sale of rows) {
+      const items = await db.select<ItemRow[]>(
+        "SELECT * FROM sale_items WHERE sale_id=$1",
+        [sale.id]
+      );
+      list.push({
+        ...sale,
+        items,
+        customerName: sale.customer_id
+          ? customers.find((x) => x.id === sale.customer_id)?.name ?? "Unknown"
+          : "Walk-in",
+      });
+    }
+    setRecent(list);
+    // FIX: yahan se loadTop hata diya - wo neeche wale useEffect me hai
   }
-  setRecent(list);
-  void loadTop(topPeriod);
-}
 
   async function loadTop(p: Period) {
     const db = await getDb();
@@ -114,26 +111,31 @@ export default function Dashboard() {
   }
 
   async function handleNativeBackup() {
-    if (backupBusy) return;
-    setBackupBusy(true);
-    try {
-      const db = await getDb();
-      await db.execute("PRAGMA wal_checkpoint(TRUNCATE)");
-      const path = await invoke<string>("backup_db");
-      markBackupDone(`DB Backup ho gaya: ${path}`);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err ?? "");
-      if (msg.includes("Cancelled")) {
-      } else {
-        alert("DB Backup failed: " + msg);
-      }
-    } finally {
-      setBackupBusy(false);
+  if (backupBusy) return;
+  setBackupBusy(true);
+  try {
+    // 1. Pehle WAL ko 2 dafa checkpoint karo - 1 dafa BUSY aa sakta hai
+    await checkpointDb();
+    await new Promise(r => setTimeout(r, 500));
+    await checkpointDb();
+    await new Promise(r => setTimeout(r, 500));
+
+    // 2. Ab copy karo
+    const path = await invoke<string>("backup_db");
+    markBackupDone(`DB Backup ho gaya: ${path}`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err ?? "");
+    if (!msg.includes("Cancelled")) {
+      alert("DB Backup failed: " + msg);
     }
+  } finally {
+    setBackupBusy(false);
   }
+}
 
   async function exportBackupJSON() {
     try {
+      await checkpointDb();
       const db = await getDb();
       const products = await db.select("SELECT * FROM products ORDER BY id");
       const customers = await db.select("SELECT * FROM customers ORDER BY id");
@@ -157,100 +159,22 @@ export default function Dashboard() {
     if (!file) return;
     if (!confirm("⚠️ RESTORE: Backup ka data merge hoga. Jo pehle se hai wo dobara nahi aayega, Udhar overwrite nahi hoga. Continue?")) { e.target.value = ""; return; }
     try {
+      // FIX: Poora lamba restore code ab db.ts me hai - yahan sirf 1 call
       const data = JSON.parse(await file.text());
-      const db = await getDb();
-      let pCount = 0, sCount = 0, kCount = 0, skippedKhata = 0;
-
-      if (Array.isArray(data.products)) {
-        for (const p of data.products) {
-          const existing = p.barcode
-            ? await db.select<{ id: number }[]>("SELECT id FROM products WHERE REPLACE(UPPER(barcode), '-', '') = $1 LIMIT 1", [(p.barcode || "").trim().toUpperCase().replace(/[\s-]/g, "")])
-            : await db.select<{ id: number }[]>("SELECT id FROM products WHERE name = $1 AND (barcode IS NULL OR barcode = '') LIMIT 1", [p.name]);
-          if (existing.length > 0) {
-            await db.execute(
-            "UPDATE products SET name=$1, price=$2, cost=$3, barcode=$4, stock=$5, category=$6, company=$7 WHERE id=$8",
-            [p.name, p.price, p.cost, p.barcode || "", p.stock || 0, p.category || "General", p.company || "", existing[0].id]
-          );
-          } else {
-            await db.execute("INSERT INTO products (name, price, cost, barcode, stock, category, company) VALUES ($1,$2,$3,$4,$5,$6,$7)", [p.name, p.price, p.cost, p.barcode || "", p.stock, p.category || "General", p.company || ""]);
-          }
-          pCount++;
-        }
-      }
-
-      if (Array.isArray(data.customers)) {
-        for (const c of data.customers) {
-          await db.execute("INSERT OR IGNORE INTO customers (id, name, phone, total_udhar) VALUES ($1,$2,$3,$4)", [c.id, c.name, c.phone || "", c.total_udhar || 0]);
-        }
-      }
-
-      if (Array.isArray(data.sales)) {
-        for (const s of data.sales) {
-          const exists = await db.select<{ id: number }[]>("SELECT id FROM sales WHERE id=$1 LIMIT 1", [s.id]);
-          if (exists.length === 0) {
-            await db.execute("INSERT INTO sales (id, total, cash, change_amt, customer_id, type, profit, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", [s.id, s.total, s.cash, s.change_amt, s.customer_id, s.type, s.profit ?? 0, s.created_at]);
-            sCount++;
-          }
-        }
-      }
-
-      if (Array.isArray(data.sale_items)) {
-        for (const it of data.sale_items) {
-          const exists = await db.select<{ sale_id: number }[]>("SELECT sale_id FROM sale_items WHERE sale_id=$1 AND product_name=$2 LIMIT 1", [it.sale_id, it.product_name]);
-          if (exists.length === 0) {
-            await db.execute(
-            "INSERT INTO sale_items (sale_id, product_id, product_name, qty, price, cost) VALUES ($1,$2,$3,$4,$5,$6)",
-            [it.sale_id, it.product_id ?? null, it.product_name, it.qty, it.price, it.cost ?? 0]
-          );
-          }
-        }
-      }
-
-      if (Array.isArray(data.khata)) {
-        for (const k of data.khata) {
-          if (k.id) {
-            const byId = await db.select<{ id: number }[]>("SELECT id FROM khata WHERE id=$1 LIMIT 1", [k.id]);
-            if (byId.length > 0) { skippedKhata++; continue; }
-          }
-          const dup = await db.select<{ id: number }[]>(
-            "SELECT id FROM khata WHERE customer_id=$1 AND amount=$2 AND type=$3 AND COALESCE(note,'')=$4 AND COALESCE(created_at,'')=$5 LIMIT 1",
-            [k.customer_id, k.amount, k.type || "udhar", k.note || "", k.created_at || ""]
-          );
-          if (dup.length === 0) {
-            await db.execute("INSERT INTO khata (id, customer_id, amount, note, type, created_at) VALUES ($1,$2,$3,$4,$5,$6)", [k.id, k.customer_id, k.amount, k.note || "", k.type || "udhar", k.created_at || new Date().toISOString()]);
-            kCount++;
-          } else {
-            skippedKhata++;
-          }
-        }
-      }
-
-      const allCustomers = await db.select<{ id: number }[]>("SELECT id FROM customers");
-      for (const cust of allCustomers) {
-        const sums = await db.select<{ udhar: number; paid: number }[]>(
-          "SELECT COALESCE(SUM(CASE WHEN type='udhar' THEN amount ELSE 0 END),0) as udhar, COALESCE(SUM(CASE WHEN type='paid' THEN amount ELSE 0 END),0) as paid FROM khata WHERE customer_id=$1",
-          [cust.id]
-        );
-        const correctUdhar = Math.max(0, (sums[0]?.udhar || 0) - (sums[0]?.paid || 0));
-        await db.execute("UPDATE customers SET total_udhar=$1 WHERE id=$2", [correctUdhar, cust.id]);
-      }
-
-      alert(`✅ Restore ho gaya!\nProducts checked: ${pCount}\nSales nayi aayi: ${sCount} (baaki pehle se thi)\nKhata nayi aayi: ${kCount}, Duplicate skip ki: ${skippedKhata}\n\nUdhar Khata se dobara calculate kar diya hai.`);
+      const res = await restoreBackup(data);
+      alert(`✅ Restore ho gaya!\nProducts checked: ${res.pCount}\nSales nayi aayi: ${res.sCount} (baaki pehle se thi)\nKhata nayi aayi: ${res.kCount}, Duplicate skip ki: ${res.skippedKhata}\n\nUdhar Khata se dobara calculate kar diya hai.`);
       window.location.reload();
     } catch (err) { alert("Restore failed: " + String(err)); }
     e.target.value = "";
   }
 
-   
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     try { setLastBackup(localStorage.getItem("madina-last-backup") || ""); } catch { /* ignore */ }
     void load();
   }, []);
-
+// eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadTop(topPeriod); }, [topPeriod]);
-
-     
 
   const card = "bg-white p-5 rounded-2xl border shadow-sm";
   const cards = [

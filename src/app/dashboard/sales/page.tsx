@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { getDb, searchProductsFast, getOrCreateCustomer, saveSaleAtomic, type Product, type Customer } from "@/lib/db";
+import { getDb, searchProductsFast, getOrCreateCustomer, saveSaleAtomic, processReturn, type Product, type Customer } from "@/lib/db";
 
 type CartItem = { p: Product; qty: number | ""; price: number | "" };
 type Receipt = { id: number; items: CartItem[]; total: number; cash: number; change: number; type: string; customerName: string; date: string };
@@ -98,23 +98,31 @@ function SalesPageInner() {
     } catch (e) { console.error(e); }
   }
   async function loadRecent(p: Period) {
-    try {
-      const db = await getDb();
-      let where = "";
-      if (p === "today") where = "WHERE date(created_at) = date('now','localtime')";
-      if (p === "weekly") where = "WHERE date(created_at) >= date('now','localtime','-7 days')";
-      if (p === "monthly") where = "WHERE date(created_at) >= date('now','localtime','-1 month')";
-      const rows = await db.select<SaleRow[]>(`SELECT * FROM sales ${where} ORDER BY id DESC LIMIT 20`);
-      const custs = await db.select<Customer[]>("SELECT * FROM customers");
-      const list: RecentSale[] = [];
-      for (const s of rows) {
-        const items = await db.select<ItemRow[]>("SELECT * FROM sale_items WHERE sale_id=$1", [s.id]);
-        const customerName = s.customer_id ? custs.find((c) => c.id === s.customer_id)?.name ?? "Unknown" : "Walk-in";
-        list.push({ ...s, items, customerName });
-      }
-      setRecent(list);
-    } catch (e) { console.error(e); }
-  }
+  try {
+    const db = await getDb();
+    let where = "";
+    if (p === "today") where = "WHERE date(created_at) = date('now','localtime')";
+    if (p === "weekly") where = "WHERE date(created_at) >= date('now','localtime','-7 days')";
+    if (p === "monthly") where = "WHERE date(created_at) >= date('now','localtime','-1 month')";
+    const rows = await db.select<SaleRow[]>(`SELECT * FROM sales ${where} ORDER BY id DESC LIMIT 20`);
+    const custs = await db.select<Customer[]>("SELECT * FROM customers");
+    const allItems: ItemRow[] = rows.length
+      ? await db.select<ItemRow[]>(`SELECT * FROM sale_items WHERE sale_id IN (${rows.map((_, i) => `$${i + 1}`).join(",")})`, rows.map((s) => s.id))
+      : [];
+    const bySale = new Map<number, ItemRow[]>();
+    for (const it of allItems) {
+      const arr = bySale.get(it.sale_id) ?? [];
+      arr.push(it);
+      bySale.set(it.sale_id, arr);
+    }
+    const list: RecentSale[] = rows.map((s) => ({
+      ...s,
+      items: bySale.get(s.id) ?? [],
+      customerName: s.customer_id ? custs.find((c) => c.id === s.customer_id)?.name ?? "Unknown" : "Walk-in",
+    }));
+    setRecent(list);
+  } catch (e) { console.error(e); }
+}
   // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
   useEffect(() => { void load(); }, []);
   useEffect(() => { void loadRecent(period); }, [period]);
@@ -234,12 +242,6 @@ function SalesPageInner() {
   if (saleType === "cash" && Number(paid || 0) > 0 && Number(paid) < total) return alert("Cash kam hai! Cash Total se zyada ya barabar hona chahiye");
   setCheckingOut(true);
   try {
-    const db = await getDb();
-    for (const c of cart) {
-      const fresh = await db.select<{ stock: number }[]>("SELECT stock FROM products WHERE id=$1", [c.p.id]);
-      const realStock = fresh[0]?.stock ?? c.p.stock;
-      if (Number(c.qty || 0) > realStock) return alert(`⛔ ${c.p.name} ka stock kam hai — Stock: ${realStock}, Cart me: ${c.qty}`);
-    }
     const cashVal = saleType === "cash" ? (Number(paid || 0) === 0 ? total : Number(paid)) : 0;
     const changeVal = saleType === "cash" ? Math.max(0, cashVal - total) : 0;
     let custId: number | null = null;
@@ -248,7 +250,7 @@ function SalesPageInner() {
       const phoneToSave = udharName.trim() ? udharPhone : "";
       custId = await getOrCreateCustomer(finalUdharName, phoneToSave);
       custName = finalUdharName;
-      setCustomers(await db.select<Customer[]>("SELECT * FROM customers"));
+      setCustomers(await (await getDb()).select<Customer[]>("SELECT * FROM customers"));
     }
 
     // ✅ YAHAN CHANGE HAI — Purana INSERT / UPDATE sab khatam, ab sirf 1 call
@@ -281,33 +283,23 @@ function SalesPageInner() {
 }
 
   async function handlePartialReturn(sale: RecentSale, item: ItemRow, qty: number) {
-    if (qty <= 0) return alert("Return Qty 1 ya zyada likho");
-    if (qty > item.qty) return alert(`Sirf ${item.qty} hi return ho sakta hai`);
-    if (!confirm(`${item.product_name} x${qty} Return karna hai? Stock wapis ayega.`)) return;
-    const db = await getDb();
+  if (qty <= 0) return alert("Return Qty 1 ya zyada likho");
+  if (qty > item.qty) return alert(`Sirf ${item.qty} hi return ho sakta hai`);
+  if (!confirm(`${item.product_name} x${qty} Return karna hai? Stock wapis ayega.`)) return;
+  try {
+    await processReturn({
+      saleId: sale.id, itemId: item.id,
+      productId: item.product_id, productName: item.product_name,
+      qty, itemQty: item.qty, price: item.price, cost: item.cost ?? item.price,
+      saleType: sale.type, customerId: sale.customer_id,
+      saleTotal: sale.total, saleProfit: sale.profit,
+    });
     const refund = item.price * qty;
-    const cost = item.cost ?? item.price;
-    const profitToCut = Math.max(0, (item.price - cost) * qty);
-    if (item.product_id) {
-  await db.execute("UPDATE products SET stock = stock + $1 WHERE id=$2", [qty, item.product_id]);
-} else {
-  await db.execute("UPDATE products SET stock = stock + $1 WHERE name=$2", [qty, item.product_name]);
-}
-    if (sale.type === "udhar" && sale.customer_id) {
-      await db.execute("UPDATE customers SET total_udhar = MAX(0, total_udhar - $1) WHERE id=$2", [refund, sale.customer_id]);
-      await db.execute("INSERT INTO khata (customer_id, amount, note, type, created_at) VALUES ($1,$2,$3,'paid', datetime('now','localtime'))", [sale.customer_id, refund, `Return Sale #${sale.id} - ${item.product_name} x${qty}`]);
-    }
-    if (qty >= item.qty) await db.execute("DELETE FROM sale_items WHERE id=$1", [item.id]);
-    else await db.execute("UPDATE sale_items SET qty = qty - $1 WHERE id=$2", [qty, item.id]);
-    const newTotal = sale.total - refund;
-    const newProfit = Math.max(0, sale.profit - profitToCut);
-    const newChange = sale.type === "cash" ? Math.max(0, sale.cash - newTotal) : 0;
-    if (newTotal <= 0) { await db.execute("DELETE FROM sale_items WHERE sale_id=$1", [sale.id]); await db.execute("DELETE FROM sales WHERE id=$1", [sale.id]); }
-    else await db.execute("UPDATE sales SET total=$1, profit=$2, change_amt=$3 WHERE id=$4", [newTotal, newProfit, newChange, sale.id]);
-    alert(`✅ ${item.product_name} x${qty} Return ho gaya — Rs ${refund} customer ko WAPIS do${sale.type === "cash" ? ` (Change ab Rs ${newChange} hoga)` : ""}`);
+    alert(`✅ ${item.product_name} x${qty} Return ho gaya — Rs ${refund} customer ko WAPIS do`);
     setReturnQty({});
     void load();
-  }
+  } catch (e) { alert("Return fail: " + String(e)); }
+}
 
   async function openPrintWindow(html: string, title: string) {
     if (printing) return;
