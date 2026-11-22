@@ -207,7 +207,7 @@ export default function BarcodesPage() {
           <button onClick={() => { setSearch(""); setCatFilter("All"); void load("", "All"); }} className="text-xs font-bold text-red-500">Clear</button>
         </div>
       </div>
-
+      
       {msg && <p className="text-emerald-600 font-bold text-sm mt-2">{msg}</p>}
 
       <div className="grid grid-cols-3 gap-4 mt-3">
