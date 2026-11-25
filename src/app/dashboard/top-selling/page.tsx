@@ -60,8 +60,8 @@ export default function TopSellingPage() {
         <input className="w-full bg-slate-50 border px-4 py-3 rounded-xl mt-3 outline-none text-sm" placeholder="🔍 Search product..." value={search} onChange={(e) => setSearch(e.target.value)} />
       </div>
       <div className="bg-white rounded-2xl border mt-4 overflow-hidden">
-        {filtered.map((t, i) => (
-          <div key={t.product_id ?? t.name} className="px-5 py-3 border-b last:border-0">
+        {filtered.map((t, i) => ( 
+        <div key={`${t.product_id ?? 'null'}-${t.name}-${i}`} className="px-5 py-3 border-b last:border-0">
             <div className="flex justify-between items-center">
               <p className="font-bold text-sm">{i + 1}. {t.name} <span className="text-slate-400 font-normal text-xs">• Stock {t.stock}</span></p>
               <div className="text-right"><b className="text-sm">Rs {t.total.toLocaleString()}</b><p className="text-[11px] text-emerald-600 font-bold">Profit Rs {t.profit.toLocaleString()} • {t.qty} pcs</p></div>

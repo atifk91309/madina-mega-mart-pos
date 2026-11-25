@@ -1,6 +1,20 @@
 use tauri::{AppHandle, Manager};
 use tauri_plugin_sql::Builder;
 
+mod license;
+
+// ---------- LICENSE ----------
+#[tauri::command]
+fn get_my_machine_id() -> String {
+    license::get_machine_id()
+}
+
+#[tauri::command]
+fn verify_license(key: String) -> Result<String, String> {
+    let mid = license::get_machine_id();
+    license::check_license(&key, &mid)
+} 
+
 // ---------- BACKUP ----------
 #[tauri::command]
 async fn backup_db(app: AppHandle) -> Result<String, String> {
@@ -61,7 +75,12 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .invoke_handler(tauri::generate_handler![backup_db, get_app_info])
+        .invoke_handler(tauri::generate_handler![
+            backup_db,
+            get_app_info,
+            get_my_machine_id,
+            verify_license,
+        ])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

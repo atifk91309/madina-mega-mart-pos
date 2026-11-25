@@ -89,7 +89,6 @@ export default function Dashboard() {
       });
     }
     setRecent(list);
-    // FIX: yahan se loadTop hata diya - wo neeche wale useEffect me hai
   }
 
   async function loadTop(p: Period) {
@@ -111,27 +110,24 @@ export default function Dashboard() {
   }
 
   async function handleNativeBackup() {
-  if (backupBusy) return;
-  setBackupBusy(true);
-  try {
-    // 1. Pehle WAL ko 2 dafa checkpoint karo - 1 dafa BUSY aa sakta hai
-    await checkpointDb();
-    await new Promise(r => setTimeout(r, 500));
-    await checkpointDb();
-    await new Promise(r => setTimeout(r, 500));
-
-    // 2. Ab copy karo
-    const path = await invoke<string>("backup_db");
-    markBackupDone(`DB Backup ho gaya: ${path}`);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err ?? "");
-    if (!msg.includes("Cancelled")) {
-      alert("DB Backup failed: " + msg);
+    if (backupBusy) return;
+    setBackupBusy(true);
+    try {
+      await checkpointDb();
+      await new Promise(r => setTimeout(r, 500));
+      await checkpointDb();
+      await new Promise(r => setTimeout(r, 500));
+      const path = await invoke<string>("backup_db");
+      markBackupDone(`DB Backup ho gaya: ${path}`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err ?? "");
+      if (!msg.includes("Cancelled")) {
+        alert("DB Backup failed: " + msg);
+      }
+    } finally {
+      setBackupBusy(false);
     }
-  } finally {
-    setBackupBusy(false);
   }
-}
 
   async function exportBackupJSON() {
     try {
@@ -159,7 +155,6 @@ export default function Dashboard() {
     if (!file) return;
     if (!confirm("⚠️ RESTORE: Backup ka data merge hoga. Jo pehle se hai wo dobara nahi aayega, Udhar overwrite nahi hoga. Continue?")) { e.target.value = ""; return; }
     try {
-      // FIX: Poora lamba restore code ab db.ts me hai - yahan sirf 1 call
       const data = JSON.parse(await file.text());
       const res = await restoreBackup(data);
       alert(`✅ Restore ho gaya!\nProducts checked: ${res.pCount}\nSales nayi aayi: ${res.sCount} (baaki pehle se thi)\nKhata nayi aayi: ${res.kCount}, Duplicate skip ki: ${res.skippedKhata}\n\nUdhar Khata se dobara calculate kar diya hai.`);
@@ -168,13 +163,17 @@ export default function Dashboard() {
     e.target.value = "";
   }
 
+  // ✅ Ab Gate layout.tsx me hai, yahan seedha data load hoga
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    try { setLastBackup(localStorage.getItem("madina-last-backup") || ""); } catch { /* ignore */ }
+    try { setLastBackup(localStorage.getItem("madina-last-backup") || ""); } catch {}
     void load();
   }, []);
-// eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void loadTop(topPeriod); }, [topPeriod]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadTop(topPeriod);
+  }, [topPeriod]);
 
   const card = "bg-white p-5 rounded-2xl border shadow-sm";
   const cards = [
@@ -282,14 +281,14 @@ export default function Dashboard() {
                   <div className="text-right"><p className="font-black text-xs">Rs {sale.total}</p><p className="text-[11px] text-slate-400">{expandedSale === sale.id ? "▲ Hide" : "▼ Items"}</p></div>
                 </button>
                  {expandedSale === sale.id && (
-  <div className="px-3 py-2 space-y-0.5">
-    {sale.items.map((it, idx) => (
-      <p key={idx} className="text-xs text-slate-600">
-        • {it.product_name} <b>x{it.qty}</b> — Rs {it.qty * it.price}
-      </p>
-    ))}
-  </div>
-)}
+                  <div className="px-3 py-2 space-y-0.5">
+                    {sale.items.map((it, idx) => (
+                      <p key={idx} className="text-xs text-slate-600">
+                        • {it.product_name} <b>x{it.qty}</b> — Rs {it.qty * it.price}
+                      </p>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
             {recent.length === 0 && <p className="text-slate-400 py-4 text-sm">Aaj koi sale nahi</p>}
@@ -307,7 +306,7 @@ export default function Dashboard() {
           <div className="bg-white rounded-2xl border p-5">
             <div className="flex justify-between items-center"><h3 className="font-black text-lg">🏆 Top Selling</h3><div className="flex gap-1"><button onClick={() => setTopPeriod("today")} className={pill(topPeriod === "today")}>Today</button><button onClick={() => setTopPeriod("weekly")} className={pill(topPeriod === "weekly")}>Weekly</button><button onClick={() => setTopPeriod("monthly")} className={pill(topPeriod === "monthly")}>Monthly</button><button onClick={() => setTopPeriod("all")} className={pill(topPeriod === "all")}>All</button></div></div>
             <div className="space-y-2 mt-3">
-              {top.map((t, i) => (<div key={t.name} className="flex justify-between text-sm"><p className="font-bold text-xs">{i + 1}. {t.name} • {t.qty} pcs</p><b className="text-xs">Rs.{t.total.toLocaleString()}</b></div>))}
+              {top.map((t, i) => (<div key={`${t.name}-${i}`} className="flex justify-between text-sm"><p className="font-bold text-xs">{i + 1}. {t.name} • {t.qty} pcs</p><b className="text-xs">Rs.{t.total.toLocaleString()}</b></div>))}
               {top.length === 0 && <p className="text-slate-400 text-sm">Is period me koi sale nahi</p>}
             </div>
           </div>

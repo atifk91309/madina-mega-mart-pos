@@ -1,7 +1,9 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { Suspense } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import LicenseScreen from "@/components/LicenseScreen";
 
 const LINKS = [
   { href: "/dashboard", label: "Dashboard", icon: "📦" },
@@ -17,6 +19,25 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   const path = usePathname();
   const searchParams = useSearchParams();
 
+  // 🔒 LICENSE GATE - Poore dashboard ke liye
+  const [licenseOk, setLicenseOk] = useState(false);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    const check = async () => {
+      const saved = localStorage.getItem("license_key");
+      if (!saved) { setChecking(false); return; }
+      try {
+        await invoke("verify_license", { key: saved });
+        setLicenseOk(true);
+      } catch {
+        setLicenseOk(false);
+      }
+      setChecking(false);
+    };
+    check();
+  }, []);
+
   // ✅ CLEAN POS: /dashboard/sales?clean=1 ho to sidebar gayab
   const isCleanPOS = path === "/dashboard/sales" && searchParams.get("clean") === "1";
 
@@ -30,6 +51,16 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
     `flex items-center gap-3 px-4 py-2.5 rounded-xl font-bold text-sm transition ${
       isActive(href) ? "bg-white text-slate-900" : "text-slate-300 hover:bg-white/10 hover:text-white"
     }`;
+
+  // 🔒 Checking ho rahi hai to kuch mat dikhao
+  if (checking) {
+    return <div className="min-h-screen flex items-center justify-center">Loading Madina Mart...</div>;
+  }
+
+  // 🔒 License nahi hai to Sidebar bhi mat dikhao, sirf License Screen
+  if (!licenseOk) {
+    return <LicenseScreen onUnlock={() => setLicenseOk(true)} />;
+  }
 
   return (
     <div className="flex min-h-screen bg-slate-100">

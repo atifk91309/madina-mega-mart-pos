@@ -35,3 +35,8 @@ tauri-plugin-printer = "2"
 
 # --- Single Instance - 2ri window na khule ---
 tauri-plugin-single-instance = "2"
+
+# --- LICENSE ke liye - Naya ---
+sha2 = "0.10"
+chrono = "0.4"
+machine-uid = "0.5"
